@@ -1,0 +1,81 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cat > project.yml << 'EOF'
+          name: Streamify
+          options:
+            bundleIdPrefix: com.pengubow
+            deploymentTarget:
+              iOS: "16.0"
+          settings:
+            TARGETED_DEVICE_FAMILY: "1,2"
+          packages:
+            MPVKit:
+              url: https://github.com/edde746/MPVKit.git
+              revision: 48fa1a1533062ae800772071a0ef6c36f553ba45
+          targets:
+            Streamify:
+              type: application
+              platform: iOS
+              deploymentTarget: "15.0"
+              sources:
+                - Sources/Streamify
+              dependencies:
+                - package: MPVKit
+                  product: MPVKit
+              settings:
+                PRODUCT_BUNDLE_IDENTIFIER: com.pengubow.streamify
+                TARGETED_DEVICE_FAMILY: "1,2"
+                GENERATE_INFOPLIST_FILE: "NO"
+                INFOPLIST_FILE: "$(SRCROOT)/xcodebuild_Info.plist"
+          EOF
+          xcodegen generate
+
+      - name: Build archive
+        run: |
+          xcodebuild archive \
+            -project Streamify.xcodeproj \
+            -scheme Streamify \
+            -destination "generic/platform=iOS" \
+            -archivePath Streamify.xcarchive \
+            -sdk iphoneos \
+            TARGETED_DEVICE_FAMILY="1,2" \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            INFOPLIST_FILE="$GITHUB_WORKSPACE/xcodebuild_Info.plist" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -r Streamify.xcarchive/Products/Applications/Streamify.app Payload/
+          ./scripts/remove-unused-frameworks-from-app.sh Payload/Streamify.app
+          zip -r Streamify.ipa Payload/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Streamify.ipa
+          path: Streamify.ipa
