@@ -568,7 +568,19 @@ class LibraryViewModel: ObservableObject {
     }
     
     // MARK: - TMDB Enrichment
-    
+
+    func cacheTMDBSearchResults(_ contents: [SourceContent]) {
+        for content in contents {
+            guard let tmdbId = content.tmdbId else { continue }
+            if let poster = content.posterThumbnailUrl {
+                tmdbPosterCache[tmdbId] = poster
+            }
+            if let backdrop = content.thumbnailUrl {
+                tmdbBackdropCache[tmdbId] = backdrop
+            }
+        }
+    }
+
     /// Enrich merged content and library with TMDB data (posters, episodes).
     /// Fetches TMDB metadata for content that has a tmdbId and fills in missing posters and episodes.
     func enrichWithTMDB() {

@@ -550,7 +550,20 @@ nonisolated enum ContentImportService {
         
         return nil
     }
-    
+
+    // MARK: - Get thumbnail URL from source content
+    static func thumbnailURL(from sourceContent: SourceContent) -> URL? {
+        if let thumbnailUrl = sourceContent.thumbnailUrl,
+           let url = URL(string: thumbnailUrl) {
+            return url
+        }
+        if let posterUrl = sourceContent.posterThumbnailUrl,
+           let url = URL(string: posterUrl) {
+            return url
+        }
+        return nil
+    }
+
     // MARK: - Get remote thumbnail URL from sources
     private static func getRemoteThumbnailURL(for content: SavedContent) -> URL? {
         let sources = SourcesManager.loadSources()

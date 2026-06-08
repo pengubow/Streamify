@@ -264,7 +264,6 @@ struct ContentDetailView: View {
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                viewModel.refreshLibrary()
                 fetchTMDBSeasonsIfNeeded()
             }
         }

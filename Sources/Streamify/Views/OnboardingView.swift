@@ -6,6 +6,7 @@ struct StreamifyOnboardingView: View {
     @AppStorage("preferredSubtitleLanguages") private var preferredSubtitleLanguages: String = "English"
     @AppStorage("preferredAudioLanguages") private var preferredAudioLanguages: String = "English"
     @AppStorage("preferredGenres") private var preferredGenresRaw: String = ""
+    @AppStorage("tmdbApiKey") private var tmdbApiKey: String = ""
     @AppStorage("vidLinkEnabled") private var vidLinkEnabled: Bool = true
     @AppStorage("movies111Enabled") private var movies111Enabled: Bool = true
     @AppStorage("torrentioEnabled") private var torrentioEnabled: Bool = false
@@ -22,6 +23,7 @@ struct StreamifyOnboardingView: View {
 
     @State private var selectedLanguages: Set<String> = []
     @State private var selectedGenres: Set<Genre> = []
+    @State private var selectedTMDBApiKey: String = ""
     @State private var selectedVidLinkEnabled: Bool = true
     @State private var selectedMovies111Enabled: Bool = true
     @State private var selectedTorrentioEnabled: Bool = false
@@ -73,6 +75,7 @@ struct StreamifyOnboardingView: View {
                     header
                     languagesSection
                     genresSection
+                    tmdbSection
                     providersSection
                     actionSection
                 }
@@ -88,6 +91,7 @@ struct StreamifyOnboardingView: View {
                 selectedLanguages = ["English"]
             }
             selectedGenres = StreamifyPreferences.genres(from: preferredGenresRaw)
+            selectedTMDBApiKey = tmdbApiKey
             selectedVidLinkEnabled = vidLinkEnabled
             selectedMovies111Enabled = movies111Enabled
             selectedTorrentioEnabled = torrentioEnabled
@@ -158,6 +162,24 @@ struct StreamifyOnboardingView: View {
                             selectedGenres.insert(genre)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    private var tmdbSection: some View {
+        onboardingPanel(title: "TMDB", subtitle: "Add a v3 API key for search, posters, seasons, and TMDB-based streaming sources.") {
+            VStack(spacing: 10) {
+                onboardingSecureField("TMDB API key", text: $selectedTMDBApiKey)
+
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(selectedTMDBApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.orange : Color.green)
+                        .frame(width: 7, height: 7)
+                    Text(selectedTMDBApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "You can add this later in Settings" : "TMDB will be configured")
+                        .font(.caption)
+                        .foregroundStyle(selectedTMDBApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .orange : .green)
+                    Spacer(minLength: 0)
                 }
             }
         }
@@ -383,6 +405,7 @@ struct StreamifyOnboardingView: View {
             preferredSubtitleLanguages = languageRawValue
             preferredAudioLanguages = languageRawValue
             preferredGenresRaw = StreamifyPreferences.rawValue(forGenres: selectedGenres)
+            tmdbApiKey = selectedTMDBApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             vidLinkEnabled = selectedVidLinkEnabled
             movies111Enabled = selectedMovies111Enabled
             torrentioEnabled = shouldEnableTorrentio

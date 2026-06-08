@@ -215,10 +215,23 @@ final class MPVDirectVideoView: UIView {
         if #available(iOS 16.0, *) {
             hostedMetalLayer?.wantsExtendedDynamicRangeContent = enabled
         }
-        if #available(iOS 17.0, *) {
-            hostedDisplayLayer?.wantsExtendedDynamicRangeContent = enabled
+        if let hostedDisplayLayer {
+            if #available(iOS 17.0, *) {
+                hostedDisplayLayer.wantsExtendedDynamicRangeContent = enabled
+            }
         }
         CATransaction.commit()
+    }
+
+    func recoverDisplayLayerIfNeeded() {
+        guard let hostedDisplayLayer else { return }
+
+        let requiresFlush = hostedDisplayLayer.requiresFlushToResumeDecoding
+        let status = hostedDisplayLayer.status
+        guard requiresFlush || status == .failed else { return }
+
+        hostedDisplayLayer.flush()
+        StreamifyLogger.log("MPVDirectVideoView: flushed AVSampleBufferDisplayLayer (status=\(status.rawValue), requiresFlush=\(requiresFlush))")
     }
 
     func warmSampleBufferTimebase(currentTime: Double, isPlaying: Bool) {
@@ -244,6 +257,7 @@ final class MPVDirectVideoView: UIView {
 
     func prepareForPlaybackRecovery(currentTime: Double) {
         refreshDrawableSize()
+        recoverDisplayLayerIfNeeded()
         warmSampleBufferTimebase(currentTime: currentTime, isPlaying: false)
     }
 }
@@ -275,6 +289,14 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private var didReportReady = false
     private var didReportFinished = false
     private var lastReportedHDRSignalPeak: Double?
+    private var lastAppliedExtendedDynamicRangeEnabled: Bool?
+    private var hasObservedVideoDynamicRangeMetadata = false
+    private var cachedDoviProfile: Int64 = 0
+    private var cachedDoviLevel: Int64 = 0
+    private var cachedContainerFPS: Double = 0
+    private var cachedVideoGamma: String?
+    private var cachedVideoPrimaries: String?
+    private var cachedVideoColorMatrix: String?
     private var lastAudioTracks: [MPVTrackInfo] = []
     private var lastSubtitleTracks: [MPVTrackInfo] = []
     private var lastSubtitleText: String = ""
@@ -282,6 +304,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private var pendingPlayAfterSurfaceReady = false
     private var foregroundResumeTargetTime: Double?
     private var foregroundRecoveryGeneration = 0
+    private var resumeRepaintGeneration = 0
     private var backgroundedWhilePlaying = false
     private var backgroundPiPStartRequested = false
     private var backgroundPiPFallbackGeneration = 0
@@ -358,7 +381,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         lastAudioTracks = []
         lastSubtitleTracks = []
         lastSubtitleText = ""
-        lastReportedHDRSignalPeak = nil
+        resetCachedVideoMetadata()
         resetCachedPlaybackState()
         clearPlaybackError()
         isLoading = true
@@ -409,11 +432,13 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         foregroundRecoveryGeneration += 1
         pendingPlayAfterSurfaceReady = false
         foregroundResumeTargetTime = nil
+        let wasPaused = cachedPaused || !playbackShouldAdvance
         cachedPaused = false
         commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
         commandAsync("set", args: ["pause", "no"])
         refreshPlaybackState()
         updatePiPPlaybackState()
+        repaintVideoOutputAfterResumeIfNeeded(wasPaused: wasPaused, reason: "play")
         onStarted?()
         StreamifyLogger.log("MPVDirectPlayerEngine: play()")
     }
@@ -594,6 +619,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             self.commandAsync("set", args: ["pause", "no"])
             self.refreshPlaybackState()
             self.updatePiPPlaybackState()
+            self.repaintVideoOutputAfterResumeIfNeeded(wasPaused: true, reason: "surface resume")
             StreamifyLogger.log("MPVDirectPlayerEngine: resumed after video surface recovery at \(String(format: "%.2f", repaintTarget))s")
         }
     }
@@ -628,6 +654,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                 self.cachedPaused = false
                 self.commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
                 self.commandAsync("set", args: ["pause", "no"])
+                self.repaintVideoOutputAfterResumeIfNeeded(wasPaused: true, reason: "surface repaint")
             } else {
                 self.cachedPaused = true
                 self.commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
@@ -690,7 +717,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         case .avFoundation:
             StreamifyLogger.log("MPVDirectPlayerEngine: using AVFoundation video output")
             checkError(setOptionString("vo", "avfoundation"))
-            checkOptionalError(setOptionString("avfoundation-composite-osd", "yes"), option: "avfoundation-composite-osd")
+            checkOptionalError(setOptionString("avfoundation-composite-osd", "no"), option: "avfoundation-composite-osd")
         case .metal:
             checkError(setOptionString("vo", "gpu-next"))
             checkOptionalError(setOptionString("gpu-api", "vulkan"), option: "gpu-api")
@@ -722,7 +749,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         checkOptionalError(setOptionString("video-unscaled", "no"), option: "video-unscaled")
         checkError(setOptionString("keep-open", "yes"))
         checkError(setOptionString("pause", "yes"))
-        checkOptionalError(setOptionString("target-colorspace-hint", "yes"), option: "target-colorspace-hint")
+        checkOptionalError(setOptionString("target-colorspace-hint", "auto"), option: "target-colorspace-hint")
         applyHDRTargetOptions()
 
         checkError(c_mpv_initialize(mpv))
@@ -740,6 +767,12 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         observeProperty("track-list/count", format: MPV_FORMAT_INT64)
         observeProperty("sub-text", format: MPV_FORMAT_STRING)
         observeProperty("video-params/sig-peak", format: MPV_FORMAT_DOUBLE)
+        observeProperty("current-tracks/video/dolby-vision-profile", format: MPV_FORMAT_INT64)
+        observeProperty("current-tracks/video/dolby-vision-level", format: MPV_FORMAT_INT64)
+        observeProperty("container-fps", format: MPV_FORMAT_DOUBLE)
+        observeProperty("video-params/gamma", format: MPV_FORMAT_STRING)
+        observeProperty("video-params/primaries", format: MPV_FORMAT_STRING)
+        observeProperty("video-params/colormatrix", format: MPV_FORMAT_STRING)
 
         c_mpv_set_wakeup_callback(mpv, { context in
             guard let context else { return }
@@ -785,6 +818,12 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(recoverActiveVideoPresentation),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
     }
 
     private func setupPiPControllerIfNeeded() {
@@ -801,9 +840,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         )
         let controller = AVPictureInPictureController(contentSource: source)
         controller.delegate = self
-        if #available(iOS 14.2, *) {
-            controller.canStartPictureInPictureAutomaticallyFromInline = true
-        }
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
         pipController = controller
         StreamifyLogger.log("MPVDirectPlayerEngine: PiP controller configured")
     }
@@ -1045,6 +1082,16 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         )
     }
 
+    @objc private func recoverActiveVideoPresentation() {
+        guard mpv != nil, !isPiPActive else { return }
+        refreshVideoOutputLayout()
+        videoViewInternal.recoverDisplayLayerIfNeeded()
+        if cachedPaused {
+            commandAsync("seek", args: ["0", "relative+exact"], checkForErrors: false)
+        }
+        StreamifyLogger.log("MPVDirectPlayerEngine: recovered active video presentation")
+    }
+
     private func scheduleBackgroundPiPFallback(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self else { return }
@@ -1081,20 +1128,20 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
 
                 switch event.pointee.event_id {
                 case MPV_EVENT_PROPERTY_CHANGE:
-                    // Read the property name and — for sub-text — the new value
-                    // synchronously here, before the event buffer is recycled on
-                    // the next call to mpv_wait_event.
+                    // Read the property payload synchronously here, before the
+                    // event buffer is recycled on the next mpv_wait_event call.
                     var propertyName: String?
                     var subtitleText: String?
                     var doubleValue: Double?
+                    var intValue: Int64?
                     var flagValue: Bool?
+                    var stringValue: String?
                     if let propData = event.pointee.data {
                         let prop = propData.assumingMemoryBound(to: mpv_event_property.self).pointee
                         if let namePtr = prop.name {
                             propertyName = String(cString: namePtr)
                         }
-                        if prop.format == MPV_FORMAT_STRING,
-                           propertyName == "sub-text" {
+                        if prop.format == MPV_FORMAT_STRING {
                             // prop.data points to a (char *): dereference to get the string
                             let text: String
                             if let strPtrPtr = prop.data?.assumingMemoryBound(to: UnsafePointer<CChar>?.self),
@@ -1103,11 +1150,18 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                             } else {
                                 text = ""
                             }
-                            subtitleText = text
+                            stringValue = text
+                            if propertyName == "sub-text" {
+                                subtitleText = text
+                            }
                         }
                         if prop.format == MPV_FORMAT_DOUBLE,
                            let value = prop.data?.assumingMemoryBound(to: Double.self) {
                             doubleValue = value.pointee
+                        }
+                        if prop.format == MPV_FORMAT_INT64,
+                           let value = prop.data?.assumingMemoryBound(to: Int64.self) {
+                            intValue = value.pointee
                         }
                         if prop.format == MPV_FORMAT_FLAG,
                            let value = prop.data?.assumingMemoryBound(to: Int32.self) {
@@ -1117,13 +1171,17 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                     let capturedPropertyName = propertyName
                     let capturedSubtitleText = subtitleText
                     let capturedDoubleValue = doubleValue
+                    let capturedIntValue = intValue
                     let capturedFlagValue = flagValue
+                    let capturedStringValue = stringValue
                     Task { @MainActor in
                         if let name = capturedPropertyName {
                             self?.cacheObservedPlaybackProperty(
                                 name: name,
                                 doubleValue: capturedDoubleValue,
-                                flagValue: capturedFlagValue
+                                intValue: capturedIntValue,
+                                flagValue: capturedFlagValue,
+                                stringValue: capturedStringValue
                             )
                         }
                         // Dispatch only the work that each observed property requires:
@@ -1141,6 +1199,15 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                         case "video-params/sig-peak":
                             if let value = capturedDoubleValue {
                                 self?.handleHDRSignalPeakChange(value)
+                            }
+                        case "current-tracks/video/dolby-vision-profile",
+                             "current-tracks/video/dolby-vision-level",
+                             "container-fps",
+                             "video-params/gamma",
+                             "video-params/primaries",
+                             "video-params/colormatrix":
+                            if let name = capturedPropertyName {
+                                self?.updateExtendedDynamicRangeMode(reason: name)
                             }
                         default:
                             self?.refreshPlaybackState()
@@ -1192,6 +1259,9 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private func refreshPlaybackState() {
         guard mpv != nil else { return }
         let state = snapshotState()
+        if videoOutputKind == .avFoundation, state.isPlaying || playbackShouldAdvance {
+            videoViewInternal.recoverDisplayLayerIfNeeded()
+        }
         currentTime = state.position
         duration = state.duration
         bufferedTime = state.buffered
@@ -1231,6 +1301,39 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         pipController?.invalidatePlaybackState()
     }
 
+    private func repaintVideoOutputAfterResumeIfNeeded(wasPaused: Bool, reason: String) {
+        guard wasPaused,
+              videoOutputKind == .avFoundation,
+              !isPiPActive,
+              mpv != nil else {
+            return
+        }
+
+        let generation = foregroundRecoveryGeneration
+        resumeRepaintGeneration += 1
+        let repaintGeneration = resumeRepaintGeneration
+        videoViewInternal.recoverDisplayLayerIfNeeded()
+        videoViewInternal.syncSampleBufferTimebase(currentTime: currentTime, isPlaying: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+            guard let self,
+                  generation == self.foregroundRecoveryGeneration,
+                  repaintGeneration == self.resumeRepaintGeneration,
+                  self.videoOutputKind == .avFoundation,
+                  !self.isPiPActive,
+                  self.mpv != nil,
+                  self.playbackShouldAdvance else {
+                return
+            }
+
+            self.videoViewInternal.recoverDisplayLayerIfNeeded()
+            self.videoViewInternal.syncSampleBufferTimebase(currentTime: self.currentTime, isPlaying: true)
+            self.commandAsync("seek", args: ["0", "relative+exact"], checkForErrors: false)
+        }
+
+        StreamifyLogger.log("MPVDirectPlayerEngine: nudged AVFoundation video output after resume (\(reason))")
+    }
+
     private func handleSubtitleTextChange(_ text: String) {
         guard text != lastSubtitleText else { return }
         lastSubtitleText = text
@@ -1238,14 +1341,105 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     }
 
     private func handleHDRSignalPeakChange(_ signalPeak: Double) {
-        guard signalPeak.isFinite, signalPeak > 0 else { return }
-        if let lastReportedHDRSignalPeak,
-           abs(lastReportedHDRSignalPeak - signalPeak) < 0.05 {
-            return
+        let previousPeak = lastReportedHDRSignalPeak ?? 0
+        let nextPeak: Double
+        if signalPeak.isFinite, signalPeak > 0 {
+            nextPeak = signalPeak
+            lastReportedHDRSignalPeak = signalPeak
+            hasObservedVideoDynamicRangeMetadata = true
+        } else if signalPeak.isFinite {
+            nextPeak = 0
+            lastReportedHDRSignalPeak = nil
+            hasObservedVideoDynamicRangeMetadata = true
+        } else {
+            nextPeak = 0
+            lastReportedHDRSignalPeak = nil
         }
-        lastReportedHDRSignalPeak = signalPeak
-        videoViewInternal.setExtendedDynamicRangeEnabled(preferHDROutput && signalPeak > 1)
-        StreamifyLogger.log("MPVDirectPlayerEngine: HDR signal peak=\(String(format: "%.2f", signalPeak))x SDR")
+
+        let crossedEDRThreshold = (previousPeak > 1) != (nextPeak > 1)
+        if abs(previousPeak - nextPeak) >= 0.05 || crossedEDRThreshold {
+            StreamifyLogger.log("MPVDirectPlayerEngine: HDR signal peak=\(String(format: "%.2f", nextPeak))x SDR")
+        }
+        updateExtendedDynamicRangeMode(reason: "video-params/sig-peak")
+    }
+
+    private func updateExtendedDynamicRangeMode(reason: String) {
+        let shouldEnableEDR = shouldEnableExtendedDynamicRange
+        guard lastAppliedExtendedDynamicRangeEnabled != shouldEnableEDR else { return }
+
+        lastAppliedExtendedDynamicRangeEnabled = shouldEnableEDR
+        videoViewInternal.setExtendedDynamicRangeEnabled(shouldEnableEDR)
+        StreamifyLogger.log("MPVDirectPlayerEngine: EDR \(shouldEnableEDR ? "enabled" : "disabled") (\(reason); \(extendedDynamicRangeMetadataSummary))")
+    }
+
+    private var shouldEnableExtendedDynamicRange: Bool {
+        observedVideoSuggestsExtendedDynamicRange ||
+            (preferHDROutput && !hasObservedVideoDynamicRangeMetadata)
+    }
+
+    private var observedVideoSuggestsExtendedDynamicRange: Bool {
+        if let lastReportedHDRSignalPeak, lastReportedHDRSignalPeak > 1 {
+            return true
+        }
+        if cachedDoviProfile > 0 {
+            return true
+        }
+
+        let gamma = Self.normalizedVideoMetadataTag(cachedVideoGamma)
+        if gamma.contains("hlg") ||
+            gamma.contains("arib") ||
+            gamma.contains("pq") ||
+            gamma.contains("smpte2084") ||
+            gamma.contains("st2084") {
+            return true
+        }
+
+        let primaries = Self.normalizedVideoMetadataTag(cachedVideoPrimaries)
+        let matrix = Self.normalizedVideoMetadataTag(cachedVideoColorMatrix)
+        return primaries.contains("bt2020") || matrix.contains("bt2020")
+    }
+
+    private var extendedDynamicRangeMetadataSummary: String {
+        let signalPeak = lastReportedHDRSignalPeak.map { String(format: "%.2f", $0) } ?? "none"
+        var parts = [
+            "sig-peak=\(signalPeak)",
+            "dv-profile=\(cachedDoviProfile)",
+            "gamma=\(cachedVideoGamma ?? "none")",
+            "primaries=\(cachedVideoPrimaries ?? "none")",
+            "matrix=\(cachedVideoColorMatrix ?? "none")"
+        ]
+        if cachedDoviLevel > 0 {
+            parts.append("dv-level=\(cachedDoviLevel)")
+        }
+        if cachedContainerFPS > 0 {
+            parts.append("fps=\(String(format: "%.3f", cachedContainerFPS))")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func normalizedVideoMetadataTag(_ value: String?) -> String {
+        value?.lowercased().filter { $0.isLetter || $0.isNumber } ?? ""
+    }
+
+    private static func cleanedVideoMetadataString(_ value: String?) -> String? {
+        guard let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !cleaned.isEmpty else {
+            return nil
+        }
+        return cleaned
+    }
+
+    private func resetCachedVideoMetadata() {
+        lastReportedHDRSignalPeak = nil
+        hasObservedVideoDynamicRangeMetadata = false
+        cachedDoviProfile = 0
+        cachedDoviLevel = 0
+        cachedContainerFPS = 0
+        cachedVideoGamma = nil
+        cachedVideoPrimaries = nil
+        cachedVideoColorMatrix = nil
+        lastAppliedExtendedDynamicRangeEnabled = nil
+        updateExtendedDynamicRangeMode(reason: "metadata reset")
     }
 
     private func snapshotState(isLoadingOverride: Bool? = nil) -> MPVPlaybackState {
@@ -1298,7 +1492,13 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         )
     }
 
-    private func cacheObservedPlaybackProperty(name: String, doubleValue: Double?, flagValue: Bool?) {
+    private func cacheObservedPlaybackProperty(
+        name: String,
+        doubleValue: Double?,
+        intValue: Int64?,
+        flagValue: Bool?,
+        stringValue: String?
+    ) {
         switch name {
         case "pause":
             if let flagValue { cachedPaused = flagValue }
@@ -1318,6 +1518,30 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             if let doubleValue, doubleValue.isFinite { cachedDemuxerCacheTime = max(doubleValue, 0) }
         case "speed":
             if let doubleValue, doubleValue.isFinite { cachedPlaybackSpeed = max(doubleValue, 0) }
+        case "current-tracks/video/dolby-vision-profile":
+            cachedDoviProfile = max(intValue ?? 0, 0)
+            if cachedDoviProfile > 0 {
+                hasObservedVideoDynamicRangeMetadata = true
+            }
+        case "current-tracks/video/dolby-vision-level":
+            cachedDoviLevel = max(intValue ?? 0, 0)
+        case "container-fps":
+            cachedContainerFPS = doubleValue.map { $0.isFinite ? max($0, 0) : 0 } ?? 0
+        case "video-params/gamma":
+            cachedVideoGamma = Self.cleanedVideoMetadataString(stringValue)
+            if cachedVideoGamma != nil {
+                hasObservedVideoDynamicRangeMetadata = true
+            }
+        case "video-params/primaries":
+            cachedVideoPrimaries = Self.cleanedVideoMetadataString(stringValue)
+            if cachedVideoPrimaries != nil {
+                hasObservedVideoDynamicRangeMetadata = true
+            }
+        case "video-params/colormatrix":
+            cachedVideoColorMatrix = Self.cleanedVideoMetadataString(stringValue)
+            if cachedVideoColorMatrix != nil {
+                hasObservedVideoDynamicRangeMetadata = true
+            }
         default:
             break
         }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 extension ContentDetailView {
     // MARK: - Resolve tracks from all available sources (metadata, sourceContent, raw sources)
@@ -1018,21 +1019,10 @@ extension ContentDetailView {
                     if merged.isEmpty {
                         StreamifyLogger.log("Quality picker: No qualities found from any source, not showing picker")
                     } else {
-                        // Pre-select the highest bandwidth quality
+                        // Pre-select the best available quality for this display.
                         selectedDownloadQualities.removeAll()
-                        if let highest = merged.max(by: { $0.bandwidth < $1.bandwidth }) {
-                            // Filter out already-downloaded, then pre-select highest available
-                            let downloadedQualities = getDownloadedQualities(for: selectedEpisodeForDownload)
-                            let available = merged.filter { quality in
-                                !downloadedQualities.contains { dq in
-                                    downloadQuality(dq, matches: quality)
-                                }
-                            }
-                            if let highestAvailable = available.max(by: { $0.bandwidth < $1.bandwidth }) {
-                                selectedDownloadQualities.insert(highestAvailable.id)
-                            } else {
-                                selectedDownloadQualities.insert(highest.id)
-                            }
+                        if let preferred = preferredInitialDownloadQuality(from: merged) {
+                            selectedDownloadQualities.insert(preferred.id)
                         }
                         showQualityPicker = true
                     }
@@ -1086,6 +1076,47 @@ extension ContentDetailView {
                 }
             }
         }
+    }
+
+    private var downloadPickerShouldPreferHDR: Bool {
+        if #available(iOS 16.0, *) {
+            return UIScreen.main.potentialEDRHeadroom > 1.0
+        }
+        return false
+    }
+
+    private func preferredInitialDownloadQuality(from qualities: [MultiSourceQuality]) -> MultiSourceQuality? {
+        let downloadedQualities = getDownloadedQualities(for: selectedEpisodeForDownload)
+        let available = qualities.filter { quality in
+            !downloadedQualities.contains { downloaded in
+                downloadQuality(downloaded, matches: quality)
+            }
+        }
+        return bestInitialDownloadQuality(in: available) ?? bestInitialDownloadQuality(in: qualities)
+    }
+
+    private func bestInitialDownloadQuality(in qualities: [MultiSourceQuality]) -> MultiSourceQuality? {
+        if downloadPickerShouldPreferHDR {
+            let hdrQualities = qualities.filter(\.isHDR)
+            if let bestHDR = hdrQualities.max(by: isLowerPriorityHDRDownloadQuality) {
+                return bestHDR
+            }
+        }
+        return qualities.max(by: { $0.bandwidth < $1.bandwidth })
+    }
+
+    private func isLowerPriorityHDRDownloadQuality(_ lhs: MultiSourceQuality, _ rhs: MultiSourceQuality) -> Bool {
+        let lhsSourceRank = downloadSourceRank(lhs.sourceName)
+        let rhsSourceRank = downloadSourceRank(rhs.sourceName)
+        if lhsSourceRank != rhsSourceRank {
+            return lhsSourceRank > rhsSourceRank
+        }
+
+        if lhs.bandwidth != rhs.bandwidth {
+            return lhs.bandwidth < rhs.bandwidth
+        }
+
+        return (lhs.sourceName ?? "") > (rhs.sourceName ?? "")
     }
 
     // MARK: - Download Track Picker Sheets

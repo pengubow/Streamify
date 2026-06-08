@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SWIFT_VERSION="6.2.4"
-MPVKIT_VERSION="48fa1a1533062ae800772071a0ef6c36f553ba45"
+MPVKIT_VERSION="1b0134a2ea04a3b967f61a726b5864351280b420"
 MPVKIT_URL="https://github.com/edde746/MPVKit.git"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,7 +93,23 @@ ensure_git_checkout() {
   local package_ref="$3"
   local label="$4"
 
-  if [[ -f "${package_dir}/Package.swift" ]]; then
+  if [[ -f "${package_dir}/Package.swift" && -d "${package_dir}/.git" ]]; then
+    local current_ref
+    current_ref="$(git -C "$package_dir" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$current_ref" == "$package_ref" ]]; then
+      return
+    fi
+
+    echo "Updating ${label}..."
+    git -C "$package_dir" reset --hard HEAD
+    if [[ "$package_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      git -C "$package_dir" fetch --depth 1 origin "$package_ref"
+      git -C "$package_dir" checkout --detach FETCH_HEAD
+    else
+      git -C "$package_dir" fetch --depth 1 origin "$package_ref"
+      git -C "$package_dir" checkout --detach FETCH_HEAD
+    fi
+    git -C "$package_dir" reset --hard FETCH_HEAD
     return
   fi
 

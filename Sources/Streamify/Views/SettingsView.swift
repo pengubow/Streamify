@@ -68,38 +68,38 @@ struct SettingsView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.gray)
                         }
-                        .padding(.top, 32)
-                        .padding(.bottom, 16)
+                        .padding(.top, 56)
+                        .padding(.bottom, 26)
 
                         // Import options
                         VStack(spacing: 16) {
                             StreamifySectionHeader(title: "Content")
 
                             Button {
-                                if tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    focusedField = .tmdbApiKey
-                                } else {
-                                    showImportSources = true
-                                }
+                                showImportSources = true
                             } label: {
-                                HStack {
-                                    Image(systemName: tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "key.fill" : "link")
+                                ZStack(alignment: .leading) {
+                                    Image(systemName: "link")
                                         .font(.title2)
                                         .foregroundStyle(.blue)
                                         .frame(width: 32)
 
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Add TMDB API Key" : "Manage Sources")
+                                    VStack(spacing: 5) {
+                                        Text("Manage Sources")
                                             .font(.headline)
                                             .foregroundStyle(.white)
+                                            .multilineTextAlignment(.center)
 
-                                        Text(tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Required for search and TMDB-based streaming sources" : "Import or delete sources for streaming")
+                                        Text("Import or delete sources for streaming")
                                             .font(.caption)
                                             .foregroundStyle(.gray)
+                                            .multilineTextAlignment(.center)
+                                            .fixedSize(horizontal: false, vertical: true)
                                     }
-
-                                    Spacer()
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.horizontal, 44)
                                 }
+                                .frame(maxWidth: .infinity, minHeight: 74)
                                 .padding(16)
                                 .streamifyPanel(cornerRadius: 10)
                             }

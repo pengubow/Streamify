@@ -153,11 +153,34 @@ struct LibraryView: View {
         let libraryResults = viewModel.library.filter {
             $0.metadata.title.localizedCaseInsensitiveContains(trimmed)
         }
-        let libraryIds = Set(libraryResults.map { $0.id })
+        var seenKeys = Set<String>()
+        for content in libraryResults {
+            seenKeys.formUnion(searchKeys(for: content))
+        }
         let sourceResults = allContent.filter { content in
-            content.title.localizedCaseInsensitiveContains(trimmed) && !libraryIds.contains(content.id)
+            guard content.title.localizedCaseInsensitiveContains(trimmed) else { return false }
+            let keys = searchKeys(for: content)
+            guard keys.isDisjoint(with: seenKeys) else { return false }
+            seenKeys.formUnion(keys)
+            return true
         }
         return (libraryResults, sourceResults)
+    }
+
+    private func searchKeys(for content: SavedContent) -> Set<String> {
+        var keys: Set<String> = ["id:\(content.id)"]
+        if let tmdbId = content.metadata.tmdbId {
+            keys.insert("tmdb:\(content.metadata.type.rawValue):\(tmdbId)")
+        }
+        return keys
+    }
+
+    private func searchKeys(for content: SourceContent) -> Set<String> {
+        var keys: Set<String> = ["id:\(content.id)"]
+        if let tmdbId = content.tmdbId {
+            keys.insert("tmdb:\(content.type.rawValue):\(tmdbId)")
+        }
+        return keys
     }
 
     // Filter content by genre
@@ -373,7 +396,12 @@ struct LibraryView: View {
             Text("Add content from Settings tab")
                 .font(.subheadline)
                 .foregroundStyle(.gray)
+                .multilineTextAlignment(.center)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.top, topSafeAreaInset + 92)
     }
 
     private var homeScrollView: some View {
@@ -492,6 +520,8 @@ struct LibraryView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .frame(width: cardWidth, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                     }
                     .padding(.horizontal, 16)
@@ -516,12 +546,12 @@ struct LibraryView: View {
                 .padding(.vertical, 24)
             }
 
-            sourceCarouselSection(title: "Trending", contents: tmdbTrending, cardWidth: cardWidth) { _ in [] }
-            sourceCarouselSection(title: "Popular Movies", contents: tmdbPopularMovies, cardWidth: cardWidth) { _ in [] }
-            sourceCarouselSection(title: "Popular TV Shows", contents: tmdbPopularTVShows, cardWidth: cardWidth) { _ in [] }
+            sourceCarouselSection(title: "Trending", contents: tmdbTrending, cardWidth: cardWidth, artworkPreference: .posterFirst) { _ in [] }
+            sourceCarouselSection(title: "Popular Movies", contents: tmdbPopularMovies, cardWidth: cardWidth, artworkPreference: .posterFirst) { _ in [] }
+            sourceCarouselSection(title: "Popular TV Shows", contents: tmdbPopularTVShows, cardWidth: cardWidth, artworkPreference: .posterFirst) { _ in [] }
 
             ForEach(Array(tmdbPreferredGenreSections.enumerated()), id: \.offset) { _, section in
-                sourceCarouselSection(title: section.genre.rawValue, contents: section.content, cardWidth: cardWidth) { _ in [] }
+                sourceCarouselSection(title: section.genre.rawValue, contents: section.content, cardWidth: cardWidth, artworkPreference: .posterFirst) { _ in [] }
             }
         }
     }
@@ -539,7 +569,7 @@ struct LibraryView: View {
     private func genreSection(for genre: Genre, cardWidth: CGFloat) -> some View {
         let content = categoryContent(for: genre)
         sourceCarouselSection(title: genre.rawValue, contents: content, cardWidth: cardWidth) { item in
-            viewModel.allPosterThumbnailUrls(for: item.id).compactMap { URL(string: $0) }
+            viewModel.allThumbnailUrls(for: item.id).compactMap { URL(string: $0) }
         }
     }
 
@@ -548,6 +578,7 @@ struct LibraryView: View {
         title: String,
         contents: [SourceContent],
         cardWidth: CGFloat,
+        artworkPreference: VerticalBrowseSourceCardArtworkPreference = .thumbnailFirst,
         fallbackPosterUrls: @escaping (SourceContent) -> [URL]
     ) -> some View {
         if !contents.isEmpty {
@@ -565,10 +596,13 @@ struct LibraryView: View {
                                 VerticalBrowseSourceCard(
                                     content: content,
                                     fallbackPosterUrls: fallbackPosterUrls(content),
-                                    cardWidth: cardWidth
+                                    cardWidth: cardWidth,
+                                    artworkPreference: artworkPreference
                                 )
                             }
                             .buttonStyle(.plain)
+                            .frame(width: cardWidth, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                     }
                     .padding(.horizontal, 16)
@@ -1305,7 +1339,8 @@ struct LibraryView: View {
 
     private func searchTMDB(query: String) {
         tmdbSearchTask?.cancel()
-        guard !query.isEmpty, isTMDBConfigured else {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2, isTMDBConfigured else {
             tmdbSearchResults = []
             return
         }
@@ -1313,11 +1348,12 @@ struct LibraryView: View {
             // Debounce
             try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
             guard !Task.isCancelled else { return }
-            let results = await TMDBService.search(query: query)
+            let results = await TMDBService.search(query: trimmed)
             guard !Task.isCancelled else { return }
             // Convert to SourceContent
             let content = results.map { TMDBService.toSourceContent($0) }
             await MainActor.run {
+                viewModel.cacheTMDBSearchResults(content)
                 tmdbSearchResults = content
             }
         }
@@ -1417,7 +1453,8 @@ struct LibraryView: View {
     private var searchResultsView: some View {
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let results = searchResults
-        let hasResults = !results.library.isEmpty || !results.source.isEmpty || !tmdbSearchResults.isEmpty
+        let visibleTMDBResults = filteredTMDBSearchResults(excluding: results)
+        let hasResults = !results.library.isEmpty || !results.source.isEmpty || !visibleTMDBResults.isEmpty
 
         return GeometryReader { proxy in
             let metrics = searchGridMetrics(for: proxy.size.width)
@@ -1456,6 +1493,8 @@ struct LibraryView: View {
                                         )
                                     }
                                     .buttonStyle(.plain)
+                                    .frame(width: metrics.cardWidth, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
 
                                 ForEach(results.source) { content in
@@ -1464,21 +1503,29 @@ struct LibraryView: View {
                                     } label: {
                                         VerticalBrowseSourceCard(
                                             content: content,
-                                            fallbackPosterUrls: viewModel.allPosterThumbnailUrls(for: content.id).compactMap { URL(string: $0) },
+                                            fallbackPosterUrls: viewModel.allThumbnailUrls(for: content.id).compactMap { URL(string: $0) },
                                             cardWidth: metrics.cardWidth
                                         )
                                     }
                                     .buttonStyle(.plain)
+                                    .frame(width: metrics.cardWidth, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
 
-                                // TMDB search results
-                                ForEach(tmdbSearchResults) { content in
+                                ForEach(visibleTMDBResults) { content in
                                     Button {
                                         openSearchResult(content: makeSavedContent(from: content), sourceContent: content)
                                     } label: {
-                                        VerticalBrowseSourceCard(content: content, fallbackPosterUrls: [], cardWidth: metrics.cardWidth)
+                                        VerticalBrowseSourceCard(
+                                            content: content,
+                                            fallbackPosterUrls: [],
+                                            cardWidth: metrics.cardWidth,
+                                            artworkPreference: .posterFirst
+                                        )
                                     }
                                     .buttonStyle(.plain)
+                                    .frame(width: metrics.cardWidth, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -1508,9 +1555,46 @@ struct LibraryView: View {
         }
     }
 
+    private func filteredTMDBSearchResults(
+        excluding results: (library: [SavedContent], source: [SourceContent])
+    ) -> [SourceContent] {
+        var seenKeys = Set<String>()
+        for content in results.library {
+            seenKeys.formUnion(searchKeys(for: content))
+        }
+        for content in results.source {
+            seenKeys.formUnion(searchKeys(for: content))
+        }
+
+        var filtered: [SourceContent] = []
+        for content in tmdbSearchResults {
+            let keys = searchKeys(for: content)
+            guard keys.isDisjoint(with: seenKeys) else { continue }
+            seenKeys.formUnion(keys)
+            filtered.append(content)
+        }
+        return filtered
+    }
+
     private func openSearchResult(content: SavedContent, sourceContent: SourceContent?) {
         dismissSearchKeyboard()
-        selectedDetail = DetailSelection(content: content, sourceContent: sourceContent)
+        if let sourceContent, let libraryContent = existingLibraryContent(for: sourceContent) {
+            selectedDetail = DetailSelection(content: libraryContent, sourceContent: nil)
+        } else {
+            selectedDetail = DetailSelection(content: content, sourceContent: sourceContent)
+        }
+    }
+
+    private func existingLibraryContent(for sourceContent: SourceContent) -> SavedContent? {
+        viewModel.library.first { content in
+            if content.id == sourceContent.id {
+                return true
+            }
+            guard let tmdbId = sourceContent.tmdbId else {
+                return false
+            }
+            return content.metadata.tmdbId == tmdbId && content.metadata.type == sourceContent.type
+        }
     }
 
     private func dismissSearchKeyboard() {
@@ -1564,8 +1648,10 @@ struct VerticalContinueWatchingCard: View {
     }
 
     var body: some View {
-        let thumbURL: URL? = content.flatMap { ContentImportService.posterThumbnailURL(for: $0) }
-        let allUrls = StreamifyURLList.combining(primary: thumbURL, fallbacks: fallbackPosterUrls)
+        let posterURL: URL? = content.flatMap { ContentImportService.posterThumbnailURL(for: $0) }
+        let thumbURL: URL? = content.flatMap { ContentImportService.thumbnailURLWithFallback(for: $0) }
+        let fallbackUrls = fallbackPosterUrls + [thumbURL].compactMap { $0 }
+        let allUrls = StreamifyURLList.combining(primary: posterURL, fallbacks: fallbackUrls)
         let posterHeight = cardWidth * 1.4
 
         VStack(alignment: .leading, spacing: 0) {
@@ -1652,6 +1738,9 @@ struct VerticalContinueWatchingCard: View {
             .frame(width: cardWidth, alignment: .leading)
             .padding(.top, 6)
         }
+        .frame(width: cardWidth, alignment: .leading)
+        .contentShape(Rectangle())
+        .clipped()
     }
 }
 
@@ -1824,8 +1913,13 @@ struct VerticalContentCardView: View {
     var cardWidth: CGFloat = 120
 
     var body: some View {
-        let thumbURL = ContentImportService.posterThumbnailURL(for: content)
-        let allUrls = StreamifyURLList.combining(primary: thumbURL, fallbacks: fallbackPosterUrls)
+        let posterURL = ContentImportService.posterThumbnailURL(for: content)
+        let thumbURL = ContentImportService.thumbnailURLWithFallback(for: content)
+        let fallbackUrls = fallbackPosterUrls + [thumbURL].compactMap { $0 }
+        let allUrls = StreamifyURLList.combining(
+            primary: posterURL,
+            fallbacks: fallbackUrls
+        )
         let posterHeight = cardWidth * 1.4
 
         VStack(alignment: .leading, spacing: 0) {
@@ -1867,5 +1961,8 @@ struct VerticalContentCardView: View {
             }
             .padding(.top, 6)
         }
+        .frame(width: cardWidth, alignment: .leading)
+        .contentShape(Rectangle())
+        .clipped()
     }
 }

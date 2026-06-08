@@ -11,7 +11,7 @@ let hasLocalMPVKit = FileManager.default.fileExists(atPath: "\(localMPVKitPath)/
 let dependencies: [Package.Dependency] = [
     hasLocalMPVKit
         ? .package(path: localMPVKitPath)
-        : .package(url: "https://github.com/edde746/MPVKit.git", revision: "48fa1a1533062ae800772071a0ef6c36f553ba45"),
+        : .package(url: "https://github.com/edde746/MPVKit.git", revision: "1b0134a2ea04a3b967f61a726b5864351280b420"),
 ]
 
 let streamifyDependencies: [Target.Dependency] = [

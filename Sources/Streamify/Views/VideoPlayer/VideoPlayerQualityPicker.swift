@@ -563,6 +563,9 @@ extension VideoPlayerView {
                                                     .font(.caption)
                                                     .foregroundStyle(.gray)
                                             }
+                                            if qualities.contains(where: { $0.isHDR }) {
+                                                HDRBadge(isHDR: true)
+                                            }
                                             Spacer()
                                             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                                                 .font(.caption)
@@ -664,7 +667,10 @@ extension VideoPlayerView {
                                     .font(.caption)
                                     .foregroundStyle(.gray)
                             }
-                            
+                            if quality.isHDR {
+                                HDRBadge(isHDR: true)
+                            }
+
                             SourceBadge(sourceName: quality.sourceName)
                         }
                         

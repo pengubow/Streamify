@@ -203,8 +203,8 @@ extension ContentDetailView {
             }
             return nil
         }()
-        let thumbnailURL = seasonThumbURL ?? localThumbURL ?? remoteThumbURL
-        let fallbackThumbnailUrls = [remoteThumbURL].compactMap { $0 }.filter { $0 != thumbnailURL }
+        let thumbnailURL = localThumbURL ?? remoteThumbURL ?? seasonThumbURL
+        let fallbackThumbnailUrls = [remoteThumbURL, seasonThumbURL].compactMap { $0 }.filter { $0 != thumbnailURL }
         let allThumbnailUrls = StreamifyURLList.combining(primary: thumbnailURL, fallbacks: fallbackThumbnailUrls)
 
         return Group {
