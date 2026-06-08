@@ -578,10 +578,7 @@ struct SettingsView: View {
 
                             VStack(spacing: 12) {
                                 let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-                                let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
                                 aboutRow(title: "Version", value: version)
-                                Divider().background(Color.gray.opacity(0.3))
-                                aboutRow(title: "Build", value: build)
                             }
                             .padding(16)
                             .streamifyPanel(cornerRadius: 10)
