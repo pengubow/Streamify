@@ -13,17 +13,18 @@ enum Movies111Service {
     private static let baseURL = "https://111movies.net"
     private static let userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0"
     private static let requestMethod = "GET"
-    private static let apiContentType = "application/pdf"
+    private static let apiContentType = "application/x-www-form-urlencoded"
     private static let xRequestedWith = "XMLHttpRequest"
+    private static let csrfToken = "LwmvGU7fO9HuLkqCKReSPSKHRxM0vAAn"
     
-    private static let aesKey = StreamifyHex.bytes(from: "75745e6c15fb316b25b34af455421c257c959ba6634cacfbaec0bae019c9a31c")
-    private static let aesIV = StreamifyHex.bytes(from: "e26e7bf4549e9d99b169cf740a746e76")
-    private static let xorKey: [UInt8] = [31, 53, 243, 172, 244, 229, 114, 181]
+    private static let aesKey = StreamifyHex.bytes(from: "4f9a5b81d7e180f75b6a667d3d589081eaf78596784ebacef9e3eb6ed84b4f8e")
+    private static let aesIV = StreamifyHex.bytes(from: "933853ee92ab5b2a926c84545bff89cb")
+    private static let xorKey: [UInt8] = [213, 180]
     
     private static let standardAlphabet = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-    private static let scrambledAlphabet = Array("y5OnTckzKWGjIxS608up4F7BYVhimEZJ_NvldPfA9Ha-orQtsMwDUbqgCe3X1RL2")
+    private static let scrambledAlphabet = Array("JafNyoPWLTVOKx_tU9Dved8hrgBS5bQ7Cc4YFz-G3M0kX6muIjsEAZRnlHp1wiq2")
     
-    private static let apiPath = "APA91jIfiZxbFSzcMb2OmfKntpKPy-TQaw46YgiAUfMTO7qIqMPlsvMwYuyxK2MI2l1hlKXncY0YH8bjExtDSa5sg66tqDmP_csCi5B8-575ILXaYz2AeBtgZ7IknLrJwDKxI9OcHUaNXeJTSiugID-0polApBR10PQyX_-4GcuZwv9Sz4pLM9Y/w/1000074138859700/e200457c-4bce-5aa6-a15c-b6d8ab4b7d6c/aloom/7311467556049960822d8991a31d99836652ed0b13eb80175bf8cea462f89666"
+    private static let apiPath = "o/17c0728c-2a2c-54e2-b681-20cbb0ac49d1/cisseh"
 
     /// Fetch a playable stream for a movie by TMDB ID
     static func fetchMovieStream(tmdbId: Int) async -> MovieResult? {
@@ -356,6 +357,7 @@ enum Movies111Service {
     private static func applyAPIHeaders(to request: inout URLRequest) {
         request.setValue(apiContentType, forHTTPHeaderField: "Content-Type")
         request.setValue(xRequestedWith, forHTTPHeaderField: "X-Requested-With")
+        request.setValue(csrfToken, forHTTPHeaderField: "X-Csrf-Token")
         if requestMethod != "GET" && requestMethod != "HEAD" {
             request.setValue("0", forHTTPHeaderField: "Content-Length")
         }
