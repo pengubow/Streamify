@@ -11,20 +11,20 @@ enum Movies111Service {
     }
     
     private static let baseURL = "https://111movies.net"
-    private static let userAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0"
+    private static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1"
     private static let requestMethod = "GET"
-    private static let apiContentType = "application/xml"
+    private static let apiContentType = "text/css"
     // private static let xRequestedWith = "XMLHttpRequest"
-    private static let csrfToken = "vnTyKs9w9Tv5MdBwj88MKnAK4VFCbefK"
+    // private static let csrfToken = "vnTyKs9w9Tv5MdBwj88MKnAK4VFCbefK"
     
-    private static let aesKey = StreamifyHex.bytes(from: "06fbac19800e50d932c36c1f5997d1be339adef245117fd5f7534f5df3a2f438")
-    private static let aesIV = StreamifyHex.bytes(from: "ed4838d57dad42a02958db96442337a5")
-    private static let xorKey: [UInt8] = [29, 247, 99, 169, 140, 246, 197, 79, 230, 202]
+    private static let aesKey = StreamifyHex.bytes(from: "de4493816f1057a0bbbf292e01f596a63e86e49cc738fe53b7a8544630cd54cb")
+    private static let aesIV = StreamifyHex.bytes(from: "79ac16055f50ae0b7d2f2603d630516b")
+    private static let xorKey: [UInt8] = [33, 22, 251, 144, 223, 136, 190]
     
     private static let standardAlphabet = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
-    private static let scrambledAlphabet = Array("rNlqQzPjG6kw1aCTZgYsHKIS8myAEWbcvhnLiFp-t5uB_OV4foeDx9X0R3UJ72dM")
+    private static let scrambledAlphabet = Array("L-M82VJ0d6Y_O51xrjg9NGSAQsW3EaK7pTbIouhtXlymFPBURkzwecDviCHZfn4q")
     
-    private static let apiPath = "5fa027b95f753a9d9e20ed194bd1eec4f87a2976/3bba5201/acitoj/1000069658203559/APA91fttrAUcjNQDvYD5RGG8CGDOvSkYpLRf3PE8tQg1o8uB1YAcNQzyhG0cM44LHUmKVo1nNNil3KPhuP5DsMXMpn4oj8hVQV2SaP3M9hU8oXo0Q0jDHRWZKJ9H4fBwVrsqzl6QUXB0UxtV_MKqwK7wv0Cx3usBmcfjUajAoHI7gRQ_P8Vhot4"
+    private static let apiPath = "1000035807992697/ti/dad/54a89291-3404-58f7-98ab-a0be9a4e83ad/a4ac28a68a00237a5e80e65912167989c7627e0f15f9e666a0c87494a6cd40fc/7610007d12b1e8149390c636be4edd2d68a14725/5b5f1b09/w"
 
     /// Fetch a playable stream for a movie by TMDB ID
     static func fetchMovieStream(tmdbId: Int) async -> MovieResult? {
@@ -357,7 +357,7 @@ enum Movies111Service {
     private static func applyAPIHeaders(to request: inout URLRequest) {
         request.setValue(apiContentType, forHTTPHeaderField: "Content-Type")
         // request.setValue(xRequestedWith, forHTTPHeaderField: "X-Requested-With")
-        request.setValue(csrfToken, forHTTPHeaderField: "X-Csrf-Token")
+        // request.setValue(csrfToken, forHTTPHeaderField: "X-Csrf-Token")
         if requestMethod != "GET" && requestMethod != "HEAD" {
             request.setValue("0", forHTTPHeaderField: "Content-Length")
         }
