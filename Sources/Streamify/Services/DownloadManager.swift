@@ -798,7 +798,7 @@ class DownloadManager: ObservableObject {
             }
             return SelectedHLSVariant(
                 variant: HLSManifestParser.StreamVariant(
-                    bandwidth: selectedBandwidth,
+                    bandwidth: 0,
                     uri: sourceURL.absoluteString,
                     resolution: nil,
                     videoRange: nil,
@@ -1167,7 +1167,24 @@ class DownloadManager: ObservableObject {
         } else {
             result = await VidLinkService.fetchMovieStream(tmdbId: tmdbId)
         }
-        if let newUrl = result?.hlsUrl {
+        if let result,
+           let quality = VidLinkService.matchingQuality(
+            in: result,
+            previousURL: download.videoUrl,
+            qualityName: download.qualityName,
+            resolution: download.selectedResolution
+           ),
+           let newUrl = quality.sourceUrl ?? quality.variantUrl {
+            download.videoUrl = newUrl
+            if download.selectedResolution == nil {
+                download.selectedResolution = quality.resolution
+            }
+            if download.selectedVideoRange == nil {
+                download.selectedVideoRange = quality.videoRange
+            }
+            saveDownloads()
+            StreamifyLogger.log("DownloadManager: Refreshed VidLink \(quality.name) URL for \(download.displayTitle)")
+        } else if let newUrl = result?.hlsUrl {
             download.videoUrl = newUrl
             saveDownloads()
             StreamifyLogger.log("DownloadManager: Refreshed VidLink URL for \(download.displayTitle)")

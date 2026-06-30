@@ -80,7 +80,7 @@ extension VideoPlayerView {
                 // Stream subtitle section — show tracks that have remote sources,
                 // plus already-downloaded tracks (they appear without download button,
                 // matching the quality picker's behavior).
-                // For MPV/Matroska playback, this section carries embedded MKV tracks.
+                // For MPV playback, this section carries embedded direct-file tracks.
                 if (!viewModel.isLocalFile || viewModel.isUsingMPVPlayback) && !subs.isEmpty {
                     let streamSubs = subs.filter { track in
                         if viewModel.isUsingMPVPlayback && viewModel.isLocalFile {
@@ -92,7 +92,7 @@ extension VideoPlayerView {
                             isSubtitleLocallyAvailable(track)
                     }
                     if !streamSubs.isEmpty {
-                        Text(viewModel.isUsingMPVPlayback && viewModel.isLocalFile ? "MKV" : "Stream")
+                        Text(viewModel.isUsingMPVPlayback ? viewModel.mpvEmbeddedSourceName : "Stream")
                             .streamifyPickerSectionTitle()
 
                             let grouped = Dictionary(grouping: streamSubs, by: { $0.displayName })

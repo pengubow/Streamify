@@ -14,7 +14,27 @@ enum VidLinkService {
 
     struct VidLinkStream: Codable {
         let playlist: String?
+        let qualities: [String: VidLinkQuality]?
         let captions: [VidLinkCaption]?
+    }
+
+    struct VidLinkQuality: Codable {
+        let type: String?
+        let url: String?
+        let size: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            type = try container.decodeIfPresent(String.self, forKey: .type)
+            url = try container.decodeIfPresent(String.self, forKey: .url)
+            if let stringSize = try container.decodeIfPresent(String.self, forKey: .size) {
+                size = stringSize
+            } else if let intSize = try container.decodeIfPresent(Int64.self, forKey: .size) {
+                size = String(intSize)
+            } else {
+                size = nil
+            }
+        }
     }
 
     struct VidLinkCaption: Codable {
@@ -25,6 +45,7 @@ enum VidLinkService {
     struct VidLinkResult {
         let hlsUrl: String
         let subtitles: [SubtitleTrack]
+        let qualities: [HLSQuality]
     }
     
     // MARK: - VidLink Request Helpers
@@ -95,7 +116,7 @@ enum VidLinkService {
             request.timeoutInterval = 15
             request.setValue("https://vidlink.pro", forHTTPHeaderField: "Origin")
             request.setValue("https://vidlink.pro/", forHTTPHeaderField: "Referer")
-            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
@@ -105,11 +126,6 @@ enum VidLinkService {
             }
             
             let decoded = try JSONDecoder().decode(VidLinkResponse.self, from: data)
-            
-            guard let playlist = decoded.stream?.playlist, !playlist.isEmpty else {
-                StreamifyLogger.log("VidLinkService: No playlist in response")
-                return nil
-            }
             
             // Convert captions to SubtitleTrack array
             let subtitles: [SubtitleTrack] = (decoded.stream?.captions ?? []).compactMap { caption in
@@ -130,15 +146,100 @@ enum VidLinkService {
                     sourceName: "VidLink"
                 )
             }
-            
-            StreamifyLogger.log("VidLinkService: Got playlist with \(subtitles.count) subtitle(s)")
-            return VidLinkResult(hlsUrl: playlist, subtitles: subtitles)
+
+            let qualities = parseFileQualities(decoded.stream?.qualities ?? [:])
+
+            if let playlist = decoded.stream?.playlist, !playlist.isEmpty {
+                StreamifyLogger.log("VidLinkService: Got playlist with \(subtitles.count) subtitle(s)")
+                return VidLinkResult(hlsUrl: playlist, subtitles: subtitles, qualities: qualities)
+            }
+
+            if let bestQuality = qualities.first,
+               let bestUrl = bestQuality.sourceUrl, !bestUrl.isEmpty {
+                StreamifyLogger.log("VidLinkService: Got \(qualities.count) direct quality file(s) with \(subtitles.count) subtitle(s)")
+                return VidLinkResult(hlsUrl: bestUrl, subtitles: subtitles, qualities: qualities)
+            }
+
+            StreamifyLogger.log("VidLinkService: No playlist or direct qualities in response")
+            return nil
         } catch {
             StreamifyLogger.log("VidLinkService: Error fetching stream: \(error.localizedDescription)")
             return nil
         }
     }
-    
+
+    static func matchingQuality(
+        in result: VidLinkResult,
+        previousURL: String?,
+        qualityName: String?,
+        resolution: String?
+    ) -> HLSQuality? {
+        guard !result.qualities.isEmpty else { return nil }
+
+        if let previousURL,
+           let match = result.qualities.first(where: { $0.sourceUrl == previousURL || $0.variantUrl == previousURL }) {
+            return match
+        }
+
+        if let qualityName,
+           let match = result.qualities.first(where: { $0.name.caseInsensitiveCompare(qualityName) == .orderedSame }) {
+            return match
+        }
+
+        if let resolution,
+           let match = result.qualities.first(where: { $0.resolution == resolution }) {
+            return match
+        }
+
+        return result.qualities.first
+    }
+
+    private static func parseFileQualities(_ qualities: [String: VidLinkQuality]) -> [HLSQuality] {
+        qualities.compactMap { label, item -> (height: Int?, quality: HLSQuality)? in
+            guard let url = item.url, !url.isEmpty else { return nil }
+            let height = Int(label.trimmingCharacters(in: .whitespacesAndNewlines))
+            let name = height.map { "\($0)p" } ?? label
+            let resolution = height.flatMap(resolution(forHeight:))
+            return (height, HLSQuality(
+                name: name,
+                bandwidth: 0,
+                resolution: resolution,
+                videoRange: nil,
+                frameRate: nil,
+                sourceUrl: url,
+                variantUrl: nil,
+                sourceName: "VidLink",
+                displayDetail: nil
+            ))
+        }
+        .sorted {
+            switch ($0.height, $1.height) {
+            case let (lhs?, rhs?) where lhs != rhs:
+                return lhs > rhs
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return $0.quality.name.localizedStandardCompare($1.quality.name) == .orderedAscending
+            }
+        }
+        .map(\.quality)
+    }
+
+    private static func resolution(forHeight height: Int) -> String? {
+        switch height {
+        case 2160: return "3840x2160"
+        case 1440: return "2560x1440"
+        case 1080: return "1920x1080"
+        case 720: return "1280x720"
+        case 576: return "1024x576"
+        case 480: return "854x480"
+        case 360: return "640x360"
+        default: return nil
+        }
+    }
+
     // MARK: - Token Encryption
     
     static func encryptToken(mediaId: String) -> String {

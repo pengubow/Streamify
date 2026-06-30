@@ -128,7 +128,7 @@ extension VideoPlayerView {
                 // Stream audio section — show tracks that have remote sources,
                 // plus already-downloaded tracks (they appear without download button,
                 // matching the quality picker's behavior).
-                // For MPV/Matroska playback, this section carries embedded MKV tracks.
+                // For MPV playback, this section carries embedded direct-file tracks.
                 if (!viewModel.isLocalFile || viewModel.isUsingMPVPlayback) && !visibleTracks.isEmpty {
                     let streamTracks = visibleTracks.filter { track in
                         if viewModel.isUsingMPVPlayback && viewModel.isLocalFile {
@@ -143,7 +143,7 @@ extension VideoPlayerView {
                             isAudioLocallyAvailable(track)
                     }
                     if !streamTracks.isEmpty {
-                        Text(viewModel.isUsingMPVPlayback && viewModel.isLocalFile ? "MKV" : "Stream")
+                        Text(viewModel.isUsingMPVPlayback ? viewModel.mpvEmbeddedSourceName : "Stream")
                             .streamifyPickerSectionTitle()
 
                             let grouped = Dictionary(grouping: streamTracks, by: { $0.displayName })
@@ -229,9 +229,11 @@ extension VideoPlayerView {
         }
         if viewModel.isMPVAudioTrack(track),
            selectedAudioTrackId.isEmpty,
-           selectedAudioLanguage.isEmpty,
-           viewModel.selectedMPVAudioTrackId == track.trackId {
-            return true
+           selectedAudioLanguage.isEmpty {
+            if let selectedId = viewModel.selectedMPVAudioTrackId {
+                return selectedId == track.trackId
+            }
+            return viewModel.mpvAudioTracks.first?.trackId == track.trackId
         }
         if track.isEmbedded {
             let nonEmbedded = availableAudioTracks.filter { !$0.isEmbedded }

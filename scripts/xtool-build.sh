@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SWIFT_VERSION="6.2.4"
-MPVKIT_VERSION="1b0134a2ea04a3b967f61a726b5864351280b420"
+MPVKIT_VERSION="bed69a1cd381934c987376db1ed30b8c4725ae0c"
 MPVKIT_URL="https://github.com/edde746/MPVKit.git"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

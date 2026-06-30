@@ -292,7 +292,9 @@ struct PlaybackResolver {
         // Build list of ALL stream options for the picker. This includes HLS
         // variants from every URL provider and direct Torrentio file streams.
         var allQualityUrls: [String] = directUrls.map { $0.absoluteString }.filter { HLSQuality.looksLikeHLS($0) }
-        if let vlUrl = vidLinkUrl, !allQualityUrls.contains(vlUrl.absoluteString) {
+        if let vlUrl = vidLinkUrl,
+           HLSQuality.looksLikeHLS(vlUrl.absoluteString) || (vidLink?.qualities.isEmpty ?? true),
+           !allQualityUrls.contains(vlUrl.absoluteString) {
             allQualityUrls.append(vlUrl.absoluteString)
         }
         if let m111Url = movies111Url, !allQualityUrls.contains(m111Url.absoluteString) {
@@ -323,6 +325,21 @@ struct PlaybackResolver {
             allQualities = await PlayerViewModel.parseAllSourceQualities(
                 from: allQualityUrls, sourceNames: fullSourceNames)
         }
+        if let m111Url = movies111Url,
+           HLSQuality.looksLikeHLS(m111Url.absoluteString),
+           !allQualities.contains(where: { $0.sourceUrl == m111Url.absoluteString }) {
+            allQualities.append(HLSQuality(
+                name: "HLS",
+                bandwidth: 0,
+                resolution: nil,
+                videoRange: nil,
+                frameRate: nil,
+                sourceUrl: m111Url.absoluteString,
+                variantUrl: nil,
+                sourceName: "111Movies"
+            ))
+        }
+        allQualities.append(contentsOf: vidLink?.qualities ?? [])
         allQualities.append(contentsOf: directFileQualities(from: directUrls, sourceNames: fullSourceNames))
         if includeTorrentioDirectOptions {
             allQualities.append(contentsOf: torrentioDirectQualities(from: torrentio?.options ?? []))
@@ -424,6 +441,7 @@ struct PlaybackResolver {
             if p1 != p2 { return p1 < p2 }
             if q1.isHDR != q2.isHDR { return q1.isHDR }
             if q1.bandwidth != q2.bandwidth { return q1.bandwidth > q2.bandwidth }
+            if q1.displayRank != q2.displayRank { return q1.displayRank > q2.displayRank }
             return (q1.sourceName ?? "") < (q2.sourceName ?? "")
         }
     }

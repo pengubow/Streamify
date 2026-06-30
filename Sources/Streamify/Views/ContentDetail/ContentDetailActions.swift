@@ -466,6 +466,9 @@ extension ContentDetailView {
             let bw1 = items1.map(\.bandwidth).max() ?? 0
             let bw2 = items2.map(\.bandwidth).max() ?? 0
             if bw1 != bw2 { return bw1 > bw2 }
+            let rank1 = HLSQuality.displayRank(name: key1, resolution: items1.first?.resolution)
+            let rank2 = HLSQuality.displayRank(name: key2, resolution: items2.first?.resolution)
+            if rank1 != rank2 { return rank1 > rank2 }
             return key1.localizedCaseInsensitiveCompare(key2) == .orderedAscending
         }
     }
@@ -514,6 +517,7 @@ extension ContentDetailView {
                         let r1 = downloadSourceRank($1.sourceName)
                         if r0 != r1 { return r0 < r1 }
                         if $0.bandwidth != $1.bandwidth { return $0.bandwidth > $1.bandwidth }
+                        if $0.displayRank != $1.displayRank { return $0.displayRank > $1.displayRank }
                         return ($0.sourceName ?? "") < ($1.sourceName ?? "")
                     }
                         let grouped = Dictionary(grouping: sorted, by: { $0.name })
@@ -622,7 +626,9 @@ extension ContentDetailView {
                             HDRBadge(isHDR: true)
                         }
 
-                        SourceBadge(sourceName: quality.sourceName)
+                        if quality.sourceName != quality.name {
+                            SourceBadge(sourceName: quality.sourceName)
+                        }
                     }
 
                     if let detail = quality.displayDetail, !detail.isEmpty {

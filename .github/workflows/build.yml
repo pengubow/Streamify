@@ -33,7 +33,7 @@ jobs:
           packages:
             MPVKit:
               url: https://github.com/edde746/MPVKit.git
-              revision: 1b0134a2ea04a3b967f61a726b5864351280b420
+              revision: bed69a1cd381934c987376db1ed30b8c4725ae0c
           targets:
             Streamify:
               type: application

@@ -767,6 +767,8 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         observeProperty("track-list/count", format: MPV_FORMAT_INT64)
         observeProperty("sub-text", format: MPV_FORMAT_STRING)
         observeProperty("video-params/sig-peak", format: MPV_FORMAT_DOUBLE)
+        observeProperty("current-tracks/audio/id", format: MPV_FORMAT_INT64)
+        observeProperty("current-tracks/sub/id", format: MPV_FORMAT_INT64)
         observeProperty("current-tracks/video/dolby-vision-profile", format: MPV_FORMAT_INT64)
         observeProperty("current-tracks/video/dolby-vision-level", format: MPV_FORMAT_INT64)
         observeProperty("container-fps", format: MPV_FORMAT_DOUBLE)
@@ -1194,7 +1196,9 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                             if let text = capturedSubtitleText {
                                 self?.handleSubtitleTextChange(text)
                             }
-                        case "track-list/count":
+                        case "track-list/count",
+                             "current-tracks/audio/id",
+                             "current-tracks/sub/id":
                             self?.refreshTracks()
                         case "video-params/sig-peak":
                             if let value = capturedDoubleValue {
@@ -1569,6 +1573,8 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         var audio: [MPVTrackInfo] = []
         var subtitles: [MPVTrackInfo] = []
         let count = getInt("track-list/count")
+        let currentAudioId = getOptionalInt("current-tracks/audio/id")
+        let currentSubtitleId = getOptionalInt("current-tracks/sub/id")
         guard count > 0 else {
             publishTracksIfChanged(audio: [], subtitles: [])
             return
@@ -1597,7 +1603,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                     demuxChannelCount: channelCount,
                     demuxSamplerate: sampleRate,
                     external: external,
-                    selected: selected
+                    selected: selected || currentAudioId == id
                 ))
                 audioIndex += 1
             } else if type == "sub" {
@@ -1611,7 +1617,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                     demuxChannelCount: channelCount,
                     demuxSamplerate: sampleRate,
                     external: external,
-                    selected: selected
+                    selected: selected || currentSubtitleId == id
                 ))
                 subtitleIndex += 1
             }
@@ -1627,6 +1633,8 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                   let context = OpaquePointer(bitPattern: contextAddress) else { return }
 
             let count = self.getInt("track-list/count", context: context)
+            let currentAudioId = self.getOptionalInt("current-tracks/audio/id", context: context)
+            let currentSubtitleId = self.getOptionalInt("current-tracks/sub/id", context: context)
             guard count > 0 else {
                 Task { @MainActor in
                     self.publishTracksIfChanged(audio: [], subtitles: [])
@@ -1659,7 +1667,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                         demuxChannelCount: channelCount,
                         demuxSamplerate: sampleRate,
                         external: external,
-                        selected: selected
+                        selected: selected || currentAudioId == id
                     ))
                     audioIndex += 1
                 } else if type == "sub" {
@@ -1673,7 +1681,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
                         demuxChannelCount: channelCount,
                         demuxSamplerate: sampleRate,
                         external: external,
-                        selected: selected
+                        selected: selected || currentSubtitleId == id
                     ))
                     subtitleIndex += 1
                 }
@@ -1791,6 +1799,15 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         return Int(data)
     }
 
+    private nonisolated func getOptionalInt(_ name: String, context: OpaquePointer) -> Int? {
+        var data = Int64()
+        let status = name.withCString { namePointer in
+            c_mpv_get_property(context, namePointer, MPV_FORMAT_INT64, &data)
+        }
+        guard status >= 0 else { return nil }
+        return Int(data)
+    }
+
     private nonisolated func getFlag(_ name: String, context: OpaquePointer) -> Bool {
         var data = Int32()
         name.withCString { namePointer in
@@ -1839,6 +1856,16 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         withUnsafeMutablePointer(to: &data) { pointer in
             _ = getProperty(name, format: MPV_FORMAT_INT64, data: pointer)
         }
+        return Int(data)
+    }
+
+    private func getOptionalInt(_ name: String) -> Int? {
+        guard mpv != nil else { return nil }
+        var data = Int64()
+        let status = withUnsafeMutablePointer(to: &data) { pointer in
+            getProperty(name, format: MPV_FORMAT_INT64, data: pointer)
+        }
+        guard status >= 0 else { return nil }
         return Int(data)
     }
 

@@ -80,8 +80,35 @@ struct HLSQuality: Identifiable, Hashable {
         return !Self.looksLikeHLS(sourceUrl)
     }
 
+    var displayRank: Int {
+        Self.displayRank(name: name, resolution: resolution)
+    }
+
     static func looksLikeHLS(_ sourceUrl: String) -> Bool {
         sourceUrl.localizedCaseInsensitiveContains(".m3u8")
+    }
+
+    static func displayRank(name: String, resolution: String?) -> Int {
+        if let resolution {
+            let parts = resolution.components(separatedBy: "x")
+            if let heightString = parts.last, let height = Int(heightString) {
+                return height
+            }
+        }
+
+        let lowered = name.lowercased()
+        if lowered.contains("4k") || lowered.contains("uhd") {
+            return 2160
+        }
+
+        let pattern = #"(\d{3,4})\s*p"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: lowered, range: NSRange(lowered.startIndex..., in: lowered)),
+              let range = Range(match.range(at: 1), in: lowered),
+              let height = Int(lowered[range]) else {
+            return 0
+        }
+        return height
     }
 
     static func directFileQuality(urlString: String, sourceName: String? = nil, name: String? = nil, displayDetail: String? = nil) -> HLSQuality? {
@@ -96,7 +123,7 @@ struct HLSQuality: Identifiable, Hashable {
 
         return HLSQuality(
             name: name ?? metadata.name,
-            bandwidth: metadata.bandwidth,
+            bandwidth: 0,
             resolution: metadata.resolution,
             videoRange: metadata.videoRange,
             frameRate: metadata.frameRate,
@@ -109,7 +136,6 @@ struct HLSQuality: Identifiable, Hashable {
 
     private struct DirectFileMetadata {
         let name: String
-        let bandwidth: Double
         let resolution: String?
         let videoRange: String?
         let frameRate: String?
@@ -120,21 +146,21 @@ struct HLSQuality: Identifiable, Hashable {
         let lowered = readableName.lowercased()
         let tokens = Set(languageAndQualityTokens(from: readableName))
 
-        let resolutionInfo: (label: String, resolution: String?, bandwidth: Double)
+        let resolutionInfo: (label: String, resolution: String?)
         if tokens.contains("2160p") || tokens.contains("4k") || tokens.contains("uhd") {
-            resolutionInfo = ("2160p", "3840x2160", 25_000_000)
+            resolutionInfo = ("2160p", "3840x2160")
         } else if tokens.contains("1440p") {
-            resolutionInfo = ("1440p", "2560x1440", 16_000_000)
+            resolutionInfo = ("1440p", "2560x1440")
         } else if tokens.contains("1080p") || tokens.contains("fhd") {
-            resolutionInfo = ("1080p", "1920x1080", 8_000_000)
+            resolutionInfo = ("1080p", "1920x1080")
         } else if tokens.contains("720p") || tokens.contains("hd") {
-            resolutionInfo = ("720p", "1280x720", 4_000_000)
+            resolutionInfo = ("720p", "1280x720")
         } else if tokens.contains("576p") {
-            resolutionInfo = ("576p", "1024x576", 2_500_000)
+            resolutionInfo = ("576p", "1024x576")
         } else if tokens.contains("480p") || tokens.contains("sd") {
-            resolutionInfo = ("480p", "854x480", 1_500_000)
+            resolutionInfo = ("480p", "854x480")
         } else {
-            resolutionInfo = (fallbackContainer, nil, 0)
+            resolutionInfo = (fallbackContainer, nil)
         }
 
         let videoRange: String?
@@ -159,7 +185,6 @@ struct HLSQuality: Identifiable, Hashable {
 
         return DirectFileMetadata(
             name: resolutionInfo.label,
-            bandwidth: resolutionInfo.bandwidth,
             resolution: resolutionInfo.resolution,
             videoRange: videoRange,
             frameRate: frameRate
@@ -287,6 +312,10 @@ struct MultiSourceQuality: Identifiable {
         guard let first = sourceUrls.first else { return false }
         return !first.localizedCaseInsensitiveContains(".m3u8")
     }
+
+    var displayRank: Int {
+        HLSQuality.displayRank(name: name, resolution: resolution)
+    }
 }
 
 @MainActor
@@ -343,6 +372,10 @@ class PlayerViewModel: ObservableObject {
     var playerItem: AVPlayerItem? { customEngine?.playerItem }
 
     var isUsingMPVPlayback: Bool { mpvEngine != nil }
+    var mpvEmbeddedSourceName: String {
+        let mappedSourceName = currentPlaybackUrl.flatMap { lastSetupSourceNames[$0.absoluteString] }
+        return Self.mpvEmbeddedSourceName(for: currentPlaybackUrl, preferredSourceName: autoQualitySourceName ?? mappedSourceName)
+    }
 
     // MARK: - Private state
     private var loadingTask: Task<Void, Never>?
@@ -386,7 +419,13 @@ class PlayerViewModel: ObservableObject {
     }
 
     static func shouldUseMPVDirectPlayback(for url: URL) -> Bool {
-        MPVDirectPlayerEngine.isAvailable && MatroskaPlaybackSupport.isMatroskaURL(url)
+        guard MPVDirectPlayerEngine.isAvailable else { return false }
+        return MatroskaPlaybackSupport.isMatroskaURL(url) || isDirectMPVVideoFileURL(url)
+    }
+
+    private static func isDirectMPVVideoFileURL(_ url: URL) -> Bool {
+        guard !HLSQuality.looksLikeHLS(url.absoluteString) else { return false }
+        return ["mp4", "m4v", "mov"].contains(url.pathExtension.lowercased())
     }
 
     /// Candidate qualities for auto labels and ABR. Prefer the active source.
@@ -717,8 +756,9 @@ class PlayerViewModel: ObservableObject {
 
         engine.onTracksChanged = { [weak self] audioTracks, subtitleTracks in
             guard let self else { return }
-            self.mpvAudioTracks = audioTracks.map(Self.audioTrack(fromMPV:))
-            self.mpvSubtitleTracks = subtitleTracks.map(Self.subtitleTrack(fromMPV:))
+            let embeddedSourceName = self.mpvEmbeddedSourceName
+            self.mpvAudioTracks = audioTracks.map { Self.audioTrack(fromMPV: $0, sourceName: embeddedSourceName) }
+            self.mpvSubtitleTracks = subtitleTracks.map { Self.subtitleTrack(fromMPV: $0, sourceName: embeddedSourceName) }
             self.selectedMPVAudioTrackId = audioTracks.first(where: { $0.selected }).map { "mpv-audio-\($0.id)" }
             self.selectedMPVSubtitleTrackId = subtitleTracks.first(where: { $0.selected }).map { "mpv-subtitle-\($0.id)" }
             self.mpvRawAudioTracks = audioTracks
@@ -757,7 +797,7 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
-    private static func audioTrack(fromMPV track: MPVTrackInfo) -> AudioTrack {
+    private static func audioTrack(fromMPV track: MPVTrackInfo, sourceName: String) -> AudioTrack {
         let language = mpvLanguageDisplay(for: track) ?? displayLabel(forMPV: track, fallback: "Audio \(track.index + 1)")
         let label = displayLabel(forMPV: track, fallback: language)
         let display = displayNameWithLanguage(language: language, label: label, track: track)
@@ -769,11 +809,11 @@ class PlayerViewModel: ObservableObject {
             languageId: languageId(forMPV: track, fallback: "audio_\(track.id)"),
             name: display == language ? nil : display,
             trackId: "mpv-audio-\(track.id)",
-            sourceName: "MKV"
+            sourceName: track.external ? "External" : sourceName
         )
     }
 
-    private static func subtitleTrack(fromMPV track: MPVTrackInfo) -> SubtitleTrack {
+    private static func subtitleTrack(fromMPV track: MPVTrackInfo, sourceName: String) -> SubtitleTrack {
         let language = mpvLanguageDisplay(for: track) ?? displayLabel(forMPV: track, fallback: "Subtitle \(track.index + 1)")
         let codec = track.codec.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? track.codec
         return SubtitleTrack(
@@ -782,8 +822,31 @@ class PlayerViewModel: ObservableObject {
             languageId: languageId(forMPV: track, fallback: "subtitle_\(track.id)"),
             name: nil,
             trackId: "mpv-subtitle-\(track.id)",
-            sourceName: track.external ? "External" : "MKV"
+            sourceName: track.external ? "External" : sourceName
         )
+    }
+
+    private static func mpvEmbeddedSourceName(for url: URL?, preferredSourceName: String?) -> String {
+        if let preferred = preferredSourceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !preferred.isEmpty {
+            return preferred
+        }
+
+        guard let url else { return "Stream" }
+        switch url.pathExtension.lowercased() {
+        case "mkv":
+            return "MKV"
+        case "webm":
+            return "WebM"
+        case "mp4":
+            return "MP4"
+        case "m4v":
+            return "M4V"
+        case "mov":
+            return "MOV"
+        default:
+            return url.isFileURL ? "File" : "Stream"
+        }
     }
 
     private static func displayLabel(forMPV track: MPVTrackInfo, fallback: String) -> String {

@@ -467,7 +467,7 @@ extension ContentDetailView {
 
         let fallbackUrls = Array(quality.sourceUrls.dropFirst())
         let sourceName = quality.sourceName
-        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(primaryUrl) || sourceName == "Torrentio"
+        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(primaryUrl) || sourceName == "VidLink" || sourceName == "Torrentio"
         let downloadTmdbId = needsProviderRefresh ? resolveTmdbId() : nil
 
         await addToLibraryIfNeeded()
@@ -939,13 +939,13 @@ extension ContentDetailView {
     }
 
     func proceedToQualityPicker(urlString: String) {
-        let isHLS = urlString.contains(".m3u8")
-        let hasVidLinkHls = pendingVidLinkHlsUrl != nil
-        let hasMovies111Hls = pendingMovies111HlsUrl != nil
-        let hasTorrentioHls = pendingTorrentioHlsUrl != nil
+        let isHLS = HLSQuality.looksLikeHLS(urlString)
+        let vidLinkIsHLS = pendingVidLinkHlsUrl.map(HLSQuality.looksLikeHLS) ?? false
+        let movies111IsHLS = pendingMovies111HlsUrl.map(HLSQuality.looksLikeHLS) ?? false
+        let torrentioIsHLS = pendingTorrentioHlsUrl.map(HLSQuality.looksLikeHLS) ?? false
         let directQualities = pendingStreamingQualities.filter { $0.isDirectFileSource }
 
-        if isHLS || hasVidLinkHls || hasMovies111Hls || hasTorrentioHls || !directQualities.isEmpty {
+        if isHLS || vidLinkIsHLS || movies111IsHLS || torrentioIsHLS || !directQualities.isEmpty {
             loadingMessage = "Preparing download..."
             isLoadingQualities = true
 
@@ -960,16 +960,16 @@ extension ContentDetailView {
             }
 
             // Include VidLink HLS URL as a source for quality parsing
-            if let vidLinkUrl = pendingVidLinkHlsUrl, !allUrls.contains(vidLinkUrl) {
+            if let vidLinkUrl = pendingVidLinkHlsUrl, HLSQuality.looksLikeHLS(vidLinkUrl), !allUrls.contains(vidLinkUrl) {
                 allUrls.append(vidLinkUrl)
             }
 
             // Include 111Movies HLS URL as a source for quality parsing
-            if let movies111Url = pendingMovies111HlsUrl, !allUrls.contains(movies111Url) {
+            if let movies111Url = pendingMovies111HlsUrl, HLSQuality.looksLikeHLS(movies111Url), !allUrls.contains(movies111Url) {
                 allUrls.append(movies111Url)
             }
 
-            if let torrentioUrl = pendingTorrentioHlsUrl, !allUrls.contains(torrentioUrl) {
+            if let torrentioUrl = pendingTorrentioHlsUrl, HLSQuality.looksLikeHLS(torrentioUrl), !allUrls.contains(torrentioUrl) {
                 allUrls.append(torrentioUrl)
             }
 
@@ -982,19 +982,20 @@ extension ContentDetailView {
                     sourceNames = viewModel.hlsUrlSourceNames(for: content.id)
                 }
                 // Add VidLink source name
-                if let vidLinkUrl = pendingVidLinkHlsUrl {
+                if let vidLinkUrl = pendingVidLinkHlsUrl, HLSQuality.looksLikeHLS(vidLinkUrl) {
                     sourceNames[vidLinkUrl] = "VidLink"
                 }
                 // Add 111Movies source name
-                if let movies111Url = pendingMovies111HlsUrl {
+                if let movies111Url = pendingMovies111HlsUrl, HLSQuality.looksLikeHLS(movies111Url) {
                     sourceNames[movies111Url] = "111Movies"
                 }
-                if let torrentioUrl = pendingTorrentioHlsUrl {
+                if let torrentioUrl = pendingTorrentioHlsUrl, HLSQuality.looksLikeHLS(torrentioUrl) {
                     sourceNames[torrentioUrl] = "Torrentio"
                 }
 
                 let parsedHlsQualities = await PlayerViewModel.parseAllSourceQualities(from: allUrls, sourceNames: sourceNames)
-                let allQualities = parsedHlsQualities + directQualities
+                let sourceOnlyQualities = singlePlaylistSourceQualities(parsedHlsQualities: parsedHlsQualities)
+                let allQualities = parsedHlsQualities + directQualities + sourceOnlyQualities
 
                 // Convert to MultiSourceQuality for the download flow (one per source per quality level)
                 let merged = allQualities.map { q in
@@ -1018,6 +1019,7 @@ extension ContentDetailView {
                     loadingMessage = nil
                     if merged.isEmpty {
                         StreamifyLogger.log("Quality picker: No qualities found from any source, not showing picker")
+                        queuePendingDownloadWithoutQualityPicker(urlString: urlString)
                     } else {
                         // Pre-select the best available quality for this display.
                         selectedDownloadQualities.removeAll()
@@ -1029,53 +1031,78 @@ extension ContentDetailView {
                 }
             }
         } else {
-            if let episode = selectedEpisodeForDownload {
-                Task {
-                    // Prevent processQueue() from prematurely starting the video
-                    // while we're still setting up track downloads.
-                    await MainActor.run {
-                        downloadManager.beginTrackSetup()
-                    }
-                    // Add video download queued first so it's visible immediately
-                    await addToLibraryIfNeeded()
-                    let allEpisodes = content.metadata.episodes ?? sourceContent?.episodes
-                    downloadManager.addQueuedDownload(
-                        contentId: "\(content.id)_ep\(episode.episode)",
-                        videoUrl: urlString,
-                        episodeIndex: episode.episode,
-                        seasonIndex: episode.season,
-                        episodeTitle: episode.title,
-                        quality: .high,
-                        allEpisodes: allEpisodes
-                    )
-                    await startSelectedTrackDownloads(episode: episode)
-                    await MainActor.run {
-                        downloadManager.endTrackSetup()
-                        downloadManager.triggerProcessQueue()
-                    }
-                }
+            queuePendingDownloadWithoutQualityPicker(urlString: urlString)
+        }
+    }
+
+    func queuePendingDownloadWithoutQualityPicker(urlString: String) {
+        let episode = selectedEpisodeForDownload
+        let sourceName = pendingSourceName(for: urlString)
+        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(urlString) || sourceName == "VidLink" || sourceName == "Torrentio"
+        let downloadTmdbId = needsProviderRefresh ? resolveTmdbId() : nil
+
+        Task {
+            await MainActor.run {
+                downloadManager.beginTrackSetup()
+            }
+            await addToLibraryIfNeeded()
+            if let episode {
+                let allEpisodes = content.metadata.episodes ?? sourceContent?.episodes
+                downloadManager.addQueuedDownload(
+                    contentId: "\(content.id)_ep\(episode.episode)",
+                    videoUrl: urlString,
+                    episodeIndex: episode.episode,
+                    seasonIndex: episode.season,
+                    episodeTitle: episode.title,
+                    quality: .auto,
+                    allEpisodes: allEpisodes,
+                    tmdbId: downloadTmdbId,
+                    sourceName: sourceName
+                )
+                await startSelectedTrackDownloads(episode: episode)
             } else {
-                Task {
-                    // Prevent processQueue() from prematurely starting the video
-                    // while we're still setting up track downloads.
-                    await MainActor.run {
-                        downloadManager.beginTrackSetup()
-                    }
-                    // Add video download queued first so it's visible immediately
-                    await addToLibraryIfNeeded()
-                    downloadManager.addQueuedDownload(
-                        contentId: content.id,
-                        videoUrl: urlString,
-                        quality: .high
-                    )
-                    await startSelectedTrackDownloads(episode: nil)
-                    await MainActor.run {
-                        downloadManager.endTrackSetup()
-                        downloadManager.triggerProcessQueue()
-                    }
-                }
+                downloadManager.addQueuedDownload(
+                    contentId: content.id,
+                    videoUrl: urlString,
+                    quality: .auto,
+                    tmdbId: downloadTmdbId,
+                    sourceName: sourceName
+                )
+                await startSelectedTrackDownloads(episode: nil)
+            }
+            await MainActor.run {
+                downloadManager.endTrackSetup()
+                downloadManager.triggerProcessQueue()
             }
         }
+    }
+
+    private func pendingSourceName(for urlString: String) -> String? {
+        if urlString == pendingVidLinkHlsUrl { return "VidLink" }
+        if urlString == pendingMovies111HlsUrl { return "111Movies" }
+        if urlString == pendingTorrentioHlsUrl { return "Torrentio" }
+        return nil
+    }
+
+    private func singlePlaylistSourceQualities(parsedHlsQualities: [HLSQuality]) -> [HLSQuality] {
+        guard let movies111Url = pendingMovies111HlsUrl,
+              HLSQuality.looksLikeHLS(movies111Url),
+              !parsedHlsQualities.contains(where: { $0.sourceUrl == movies111Url }) else {
+            return []
+        }
+
+        return [
+            HLSQuality(
+                name: "HLS",
+                bandwidth: 0,
+                resolution: nil,
+                videoRange: nil,
+                frameRate: nil,
+                sourceUrl: movies111Url,
+                variantUrl: nil,
+                sourceName: "111Movies"
+            )
+        ]
     }
 
     private var downloadPickerShouldPreferHDR: Bool {
@@ -1098,14 +1125,14 @@ extension ContentDetailView {
     private func bestInitialDownloadQuality(in qualities: [MultiSourceQuality]) -> MultiSourceQuality? {
         if downloadPickerShouldPreferHDR {
             let hdrQualities = qualities.filter(\.isHDR)
-            if let bestHDR = hdrQualities.max(by: isLowerPriorityHDRDownloadQuality) {
+            if let bestHDR = hdrQualities.max(by: isLowerPriorityDownloadQuality) {
                 return bestHDR
             }
         }
-        return qualities.max(by: { $0.bandwidth < $1.bandwidth })
+        return qualities.max(by: isLowerPriorityDownloadQuality)
     }
 
-    private func isLowerPriorityHDRDownloadQuality(_ lhs: MultiSourceQuality, _ rhs: MultiSourceQuality) -> Bool {
+    private func isLowerPriorityDownloadQuality(_ lhs: MultiSourceQuality, _ rhs: MultiSourceQuality) -> Bool {
         let lhsSourceRank = downloadSourceRank(lhs.sourceName)
         let rhsSourceRank = downloadSourceRank(rhs.sourceName)
         if lhsSourceRank != rhsSourceRank {
@@ -1114,6 +1141,10 @@ extension ContentDetailView {
 
         if lhs.bandwidth != rhs.bandwidth {
             return lhs.bandwidth < rhs.bandwidth
+        }
+
+        if lhs.displayRank != rhs.displayRank {
+            return lhs.displayRank < rhs.displayRank
         }
 
         return (lhs.sourceName ?? "") > (rhs.sourceName ?? "")

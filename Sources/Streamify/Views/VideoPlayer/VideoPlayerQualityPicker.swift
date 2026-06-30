@@ -225,12 +225,12 @@ extension VideoPlayerView {
         return nil
     }
 
-    func prepareAndSwitchMatroskaStream(_ url: URL, quality: HLSQuality? = nil) {
+    func prepareAndSwitchDirectMPVStream(_ url: URL, quality: HLSQuality? = nil, activeQualityId: String? = nil) {
         if PlayerViewModel.shouldUseMPVDirectPlayback(for: url) {
             showQualitySheet = false
             if let quality {
                 activePlayingQualityName = quality.name
-                activePlayingQualityId = quality.id.uuidString
+                activePlayingQualityId = activeQualityId ?? quality.id.uuidString
                 viewModel.selectedQualityName = quality.name
                 viewModel.selectedQualitySourceUrl = quality.sourceUrl
                 viewModel.autoQualityLabel = quality.name
@@ -238,15 +238,22 @@ extension VideoPlayerView {
                 viewModel.autoQualitySourceName = quality.sourceName
                 viewModel.isPlayingHDR = quality.isHDR
             }
-            switchPlayerToUrl(url, preloadedQualities: viewModel.availableQualities)
+            let preloaded: [HLSQuality]
+            if let quality,
+               !viewModel.availableQualities.contains(where: { $0.sourceUrl == quality.sourceUrl || $0.variantUrl == quality.sourceUrl }) {
+                preloaded = [quality] + viewModel.availableQualities
+            } else {
+                preloaded = viewModel.availableQualities
+            }
+            switchPlayerToUrl(url, preloadedQualities: preloaded)
             return
         }
 
         // MPV direct playback is unavailable for this file. When the user explicitly
-        // selects a quality from the picker we do NOT fall back to online streaming —
+        // selects a quality from the picker we do NOT fall back to online streaming;
         // only the initial play path (VideoPlayerSetup) should do that automatically.
         showQualitySheet = false
-        StreamifyLogger.log("Quality: Matroska playback unavailable for \(url.absoluteString)")
+        StreamifyLogger.log("Quality: Direct MPV playback unavailable for \(url.absoluteString)")
     }
     
     // Switch the player to a new URL, preserving current position
@@ -381,6 +388,9 @@ extension VideoPlayerView {
             let bw1 = items1.map(bandwidth).max() ?? 0
             let bw2 = items2.map(bandwidth).max() ?? 0
             if bw1 != bw2 { return bw1 > bw2 }
+            let rank1 = HLSQuality.displayRank(name: key1, resolution: nil)
+            let rank2 = HLSQuality.displayRank(name: key2, resolution: nil)
+            if rank1 != rank2 { return rank1 > rank2 }
             return key1.localizedCaseInsensitiveCompare(key2) == .orderedAscending
         }
     }
@@ -538,6 +548,7 @@ extension VideoPlayerView {
 	                                let r2 = streamQualitySourceRank(q2.sourceName)
 	                                if r1 != r2 { return r1 < r2 }
 	                                if q1.bandwidth != q2.bandwidth { return q1.bandwidth > q2.bandwidth }
+	                                if q1.displayRank != q2.displayRank { return q1.displayRank > q2.displayRank }
 	                                return (q1.sourceName ?? "") < (q2.sourceName ?? "")
 	                            }
                             let grouped = Dictionary(grouping: sorted, by: { $0.name })
@@ -635,11 +646,11 @@ extension VideoPlayerView {
                 if quality.isDirectFileSource {
                     if let sourceUrl = quality.sourceUrl, let url = URL(string: sourceUrl) {
                         if currentVideoURL.absoluteString != sourceUrl {
-                            if MatroskaPlaybackSupport.isMatroskaURL(url) {
-                                prepareAndSwitchMatroskaStream(url, quality: quality)
+                            if PlayerViewModel.shouldUseMPVDirectPlayback(for: url) || MatroskaPlaybackSupport.isMatroskaURL(url) {
+                                prepareAndSwitchDirectMPVStream(url, quality: quality)
                             } else {
                                 showQualitySheet = false
-                                switchPlayerToUrl(url)
+                                switchPlayerToUrl(url, preloadedQualities: viewModel.availableQualities)
                             }
                         }
                     }
@@ -836,7 +847,7 @@ extension VideoPlayerView {
             allEpisodes = nil
         }
         
-        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(sourceUrl) || quality.sourceName == "Torrentio"
+        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(sourceUrl) || quality.sourceName == "VidLink" || quality.sourceName == "Torrentio"
         let downloadTmdbId: Int? = needsProviderRefresh ? resolveTmdbId() : nil
         
         DownloadManager.shared.addQueuedDownload(
@@ -866,11 +877,21 @@ extension VideoPlayerView {
                 .appendingPathComponent(folder)
                 .appendingPathComponent(dq.localSource)
             if FileManager.default.fileExists(atPath: fileURL.path) {
-                if fileURL.isFileURL && MatroskaPlaybackSupport.isMatroskaURL(fileURL) {
+                if fileURL.isFileURL && (PlayerViewModel.shouldUseMPVDirectPlayback(for: fileURL) || MatroskaPlaybackSupport.isMatroskaURL(fileURL)) {
                     activePlayingQualityName = dq.name
                     activePlayingQualityId = dq.qualityId
                     viewModel.isPlayingHDR = dq.isHDR
-                    prepareAndSwitchMatroskaStream(fileURL)
+                    let quality = HLSQuality(
+                        name: dq.name,
+                        bandwidth: dq.bandwidth,
+                        resolution: dq.resolution,
+                        videoRange: dq.isHDR ? "HDR" : nil,
+                        frameRate: nil,
+                        sourceUrl: fileURL.absoluteString,
+                        variantUrl: nil,
+                        sourceName: dq.sourceName
+                    )
+                    prepareAndSwitchDirectMPVStream(fileURL, quality: quality, activeQualityId: dq.qualityId)
                     return
                 }
                 // Local HLS m3u8 must be served via localhost HTTP server — AVPlayer
