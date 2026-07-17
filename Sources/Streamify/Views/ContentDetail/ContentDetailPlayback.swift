@@ -37,8 +37,7 @@ extension ContentDetailView {
                 directUrls: directUrls,
                 sourceNamesMap: sourceNames,
                 tmdbId: tmdbId,
-                vidLinkEnabled: vidLinkEnabled,
-                movies111Enabled: movies111Enabled,
+                vidLoveEnabled: vidLoveEnabled,
                 torrentioEnabled: torrentioEnabled,
                 onCheckingURL: { [weak skipper] url in
                     guard self.loadingMessage != nil else { return }
@@ -136,8 +135,7 @@ extension ContentDetailView {
                 tmdbId: tmdbId,
                 season: episode.season,
                 episode: episode.episode,
-                vidLinkEnabled: vidLinkEnabled,
-                movies111Enabled: movies111Enabled,
+                vidLoveEnabled: vidLoveEnabled,
                 torrentioEnabled: torrentioEnabled,
                 onCheckingURL: { [weak skipper] url in
                     guard self.loadingMessage != nil else { return }
@@ -229,8 +227,7 @@ extension ContentDetailView {
             tmdbId: tmdbId,
             season: nextEpisode.season,
             episode: nextEpisode.episode,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,
@@ -273,8 +270,7 @@ extension ContentDetailView {
             tmdbId: tmdbId,
             season: nextEpisode.season,
             episode: nextEpisode.episode,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,

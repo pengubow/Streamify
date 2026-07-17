@@ -1,6 +1,6 @@
 import Foundation
 
-/// Centralizes playback source resolution — collects URLs, fetches Torrentio/VidLink/111Movies
+/// Centralizes playback source resolution — collects URLs, fetches VidLove/Torrentio
 /// in parallel, validates, pre-parses HLS audio + qualities, and merges subtitles.
 struct PlaybackResolver {
     
@@ -8,8 +8,7 @@ struct PlaybackResolver {
     struct ResolvedPlayback {
         let url: URL
         let sourceName: String?
-        let vidLinkUrl: URL?
-        let movies111Url: URL?
+        let vidLoveUrl: URL?
         let torrentioUrl: URL?
         let preloadedAudioTracks: [AudioTrack]?
         let preloadedQualities: [HLSQuality]?
@@ -112,8 +111,7 @@ struct PlaybackResolver {
         directUrls: [URL],
         sourceNamesMap: [String: String],
         tmdbId: Int?,
-        vidLinkEnabled: Bool,
-        movies111Enabled: Bool,
+        vidLoveEnabled: Bool,
         torrentioEnabled: Bool = false,
         includeTorrentioDirectOptions: Bool = true,
         onCheckingURL: (@MainActor @Sendable (String) -> Void)? = nil,
@@ -124,12 +122,10 @@ struct PlaybackResolver {
             directUrls: directUrls,
             sourceNamesMap: sourceNamesMap,
             tmdbId: tmdbId,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             includeTorrentioDirectOptions: includeTorrentioDirectOptions,
-            fetchVidLink: { id in await VidLinkService.fetchMovieStream(tmdbId: id) },
-            fetch111Movies: { id in await Movies111Service.fetchMovieStream(tmdbId: id) },
+            fetchVidLove: { id in await VidLoveService.fetchMovieStream(tmdbId: id) },
             fetchTorrentio: { id in await TorrentioService.fetchMovieStream(tmdbId: id) },
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,
@@ -145,8 +141,7 @@ struct PlaybackResolver {
         tmdbId: Int?,
         season: Int,
         episode: Int,
-        vidLinkEnabled: Bool,
-        movies111Enabled: Bool,
+        vidLoveEnabled: Bool,
         torrentioEnabled: Bool = false,
         includeTorrentioDirectOptions: Bool = true,
         onCheckingURL: (@MainActor @Sendable (String) -> Void)? = nil,
@@ -157,12 +152,10 @@ struct PlaybackResolver {
             directUrls: directUrls,
             sourceNamesMap: sourceNamesMap,
             tmdbId: tmdbId,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             includeTorrentioDirectOptions: includeTorrentioDirectOptions,
-            fetchVidLink: { id in await VidLinkService.fetchEpisodeStream(tmdbId: id, season: season, episode: episode) },
-            fetch111Movies: { id in await Movies111Service.fetchEpisodeStream(tmdbId: id, season: season, episode: episode) },
+            fetchVidLove: { id in await VidLoveService.fetchEpisodeStream(tmdbId: id, season: season, episode: episode) },
             fetchTorrentio: { id in await TorrentioService.fetchEpisodeStream(tmdbId: id, season: season, episode: episode) },
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,
@@ -176,12 +169,10 @@ struct PlaybackResolver {
         directUrls: [URL],
         sourceNamesMap: [String: String],
         tmdbId: Int?,
-        vidLinkEnabled: Bool,
-        movies111Enabled: Bool,
+        vidLoveEnabled: Bool,
         torrentioEnabled: Bool,
         includeTorrentioDirectOptions: Bool,
-        fetchVidLink: @escaping @Sendable (Int) async -> VidLinkService.VidLinkResult?,
-        fetch111Movies: @escaping @Sendable (Int) async -> Movies111Service.MovieResult?,
+        fetchVidLove: @escaping @Sendable (Int) async -> VidLoveService.VidLoveResult?,
         fetchTorrentio: @escaping @Sendable (Int) async -> TorrentioService.TorrentioResult?,
         onCheckingURL: (@MainActor @Sendable (String) -> Void)? = nil,
         onPreparingPlayback: (@MainActor @Sendable () -> Void)? = nil,
@@ -196,10 +187,8 @@ struct PlaybackResolver {
                                                             skipper: skipper)
         }
         
-        var movies111: Movies111Service.MovieResult?
-        var movies111Url: URL?
-        var vidLink: VidLinkService.VidLinkResult?
-        var vidLinkUrl: URL?
+        var vidLove: VidLoveService.VidLoveResult?
+        var vidLoveUrl: URL?
         var torrentio: TorrentioService.TorrentioResult?
         var torrentioUrl: URL?
 
@@ -216,33 +205,20 @@ struct PlaybackResolver {
             StreamifyLogger.log("PlaybackResolver: Torrentio skipped — tmdbId=\(tmdbId.map(String.init) ?? "nil") enabled=\(torrentioEnabled)")
         }
         
-        if let tmdbId, movies111Enabled {
-            movies111 = await resolveServiceCandidate(
-                label: "111Movies",
+        if let tmdbId, vidLoveEnabled {
+            vidLove = await resolveServiceCandidate(
+                label: "VidLove",
                 onCheckingURL: onCheckingURL,
                 skipper: skipper
             ) {
-                await fetch111Movies(tmdbId)
+                await fetchVidLove(tmdbId)
             }
-            movies111Url = movies111.flatMap { URL(string: $0.hlsUrl) }
+            vidLoveUrl = vidLove.flatMap { URL(string: $0.streamUrl) }
         } else {
-            StreamifyLogger.log("PlaybackResolver: 111Movies skipped — tmdbId=\(tmdbId.map(String.init) ?? "nil") enabled=\(movies111Enabled)")
+            StreamifyLogger.log("PlaybackResolver: VidLove skipped — tmdbId=\(tmdbId.map(String.init) ?? "nil") enabled=\(vidLoveEnabled)")
         }
 
-        if let tmdbId, vidLinkEnabled {
-            vidLink = await resolveServiceCandidate(
-                label: "VidLink",
-                onCheckingURL: onCheckingURL,
-                skipper: skipper
-            ) {
-                await fetchVidLink(tmdbId)
-            }
-            vidLinkUrl = vidLink.flatMap { URL(string: $0.hlsUrl) }
-        } else {
-            StreamifyLogger.log("PlaybackResolver: VidLink skipped — tmdbId=\(tmdbId.map(String.init) ?? "nil") enabled=\(vidLinkEnabled)")
-        }
-        
-        StreamifyLogger.log("PlaybackResolver: directUrl=\(workingUrl?.absoluteString ?? "nil") torrentioUrl=\(torrentioUrl?.absoluteString ?? "nil") torrentioSubs=\(torrentio?.subtitles.count ?? 0) vidLinkUrl=\(vidLinkUrl?.absoluteString ?? "nil") vidLinkSubs=\(vidLink?.subtitles.count ?? 0) 111MoviesUrl=\(movies111Url?.absoluteString ?? "nil")")
+        StreamifyLogger.log("PlaybackResolver: directUrl=\(workingUrl?.absoluteString ?? "nil") vidLoveUrl=\(vidLoveUrl?.absoluteString ?? "nil") vidLoveSubs=\(vidLove?.subtitles.count ?? 0) torrentioUrl=\(torrentioUrl?.absoluteString ?? "nil") torrentioSubs=\(torrentio?.subtitles.count ?? 0)")
         
         // Determine final URL — prefer normal streaming sources before Torrentio.
         // Torrentio direct file options stay visible in the picker/download flow, but
@@ -252,12 +228,9 @@ struct PlaybackResolver {
         if let workingUrl = workingUrl {
             finalUrl = workingUrl
             finalSourceName = nil
-        } else if let movies111Url = movies111Url {
-            finalUrl = movies111Url
-            finalSourceName = "111Movies"
-        } else if let vidLinkUrl = vidLinkUrl {
-            finalUrl = vidLinkUrl
-            finalSourceName = "VidLink"
+        } else if let vidLoveUrl = vidLoveUrl {
+            finalUrl = vidLoveUrl
+            finalSourceName = "VidLove"
         } else if let torrentioUrl = torrentioUrl {
             finalUrl = torrentioUrl
             finalSourceName = "Torrentio"
@@ -290,15 +263,14 @@ struct PlaybackResolver {
         }
 
         // Build list of ALL stream options for the picker. This includes HLS
-        // variants from every URL provider and direct Torrentio file streams.
+        // variants from every URL provider and direct file streams.
         var allQualityUrls: [String] = directUrls.map { $0.absoluteString }.filter { HLSQuality.looksLikeHLS($0) }
-        if let vlUrl = vidLinkUrl,
-           HLSQuality.looksLikeHLS(vlUrl.absoluteString) || (vidLink?.qualities.isEmpty ?? true),
-           !allQualityUrls.contains(vlUrl.absoluteString) {
-            allQualityUrls.append(vlUrl.absoluteString)
-        }
-        if let m111Url = movies111Url, !allQualityUrls.contains(m111Url.absoluteString) {
-            allQualityUrls.append(m111Url.absoluteString)
+        for quality in vidLove?.qualities ?? [] {
+            if let sourceUrl = quality.sourceUrl,
+               HLSQuality.looksLikeHLS(sourceUrl),
+               !allQualityUrls.contains(sourceUrl) {
+                allQualityUrls.append(sourceUrl)
+            }
         }
         if let tUrl = torrentioUrl,
            (tUrl.pathExtension == "m3u8" || tUrl.absoluteString.contains(".m3u8")),
@@ -310,11 +282,10 @@ struct PlaybackResolver {
         }
 
         var fullSourceNames = sourceNamesMap
-        if let vlUrl = vidLinkUrl {
-            fullSourceNames[vlUrl.absoluteString] = "VidLink"
-        }
-        if let m111Url = movies111Url {
-            fullSourceNames[m111Url.absoluteString] = "111Movies"
+        for quality in vidLove?.qualities ?? [] {
+            if let sourceUrl = quality.sourceUrl {
+                fullSourceNames[sourceUrl] = "VidLove"
+            }
         }
         if let tUrl = torrentioUrl {
             fullSourceNames[tUrl.absoluteString] = "Torrentio"
@@ -325,21 +296,15 @@ struct PlaybackResolver {
             allQualities = await PlayerViewModel.parseAllSourceQualities(
                 from: allQualityUrls, sourceNames: fullSourceNames)
         }
-        if let m111Url = movies111Url,
-           HLSQuality.looksLikeHLS(m111Url.absoluteString),
-           !allQualities.contains(where: { $0.sourceUrl == m111Url.absoluteString }) {
-            allQualities.append(HLSQuality(
-                name: "HLS",
-                bandwidth: 0,
-                resolution: nil,
-                videoRange: nil,
-                frameRate: nil,
-                sourceUrl: m111Url.absoluteString,
-                variantUrl: nil,
-                sourceName: "111Movies"
-            ))
+        for quality in vidLove?.qualities ?? [] {
+            let alreadyParsed = quality.sourceUrl.map { sourceUrl in
+                HLSQuality.looksLikeHLS(sourceUrl)
+                    && allQualities.contains(where: { $0.sourceUrl == sourceUrl })
+            } ?? false
+            if !alreadyParsed {
+                allQualities.append(quality)
+            }
         }
-        allQualities.append(contentsOf: vidLink?.qualities ?? [])
         allQualities.append(contentsOf: directFileQualities(from: directUrls, sourceNames: fullSourceNames))
         if includeTorrentioDirectOptions {
             allQualities.append(contentsOf: torrentioDirectQualities(from: torrentio?.options ?? []))
@@ -363,8 +328,7 @@ struct PlaybackResolver {
                     subs.append(track)
                 }
             }
-            appendUnique(vidLink?.subtitles ?? [])
-            appendUnique(movies111?.subtitles ?? [])
+            appendUnique(vidLove?.subtitles ?? [])
             appendUnique(torrentio?.subtitles ?? [])
             return subs.isEmpty ? nil : subs
         }()
@@ -372,8 +336,7 @@ struct PlaybackResolver {
         return ResolvedPlayback(
             url: resolvedUrl,
             sourceName: resolvedSourceName,
-            vidLinkUrl: vidLinkUrl,
-            movies111Url: movies111Url,
+            vidLoveUrl: vidLoveUrl,
             torrentioUrl: torrentioUrl,
             preloadedAudioTracks: preloadedAudio,
             preloadedQualities: preloadedQualities,
@@ -424,11 +387,10 @@ struct PlaybackResolver {
         return result
     }
 
-    // Source priority: own sources (10) → 111Movies (20) → VidLink (30) → Torrentio (40)
+    // Source priority: own sources (10) → VidLove (20) → Torrentio (40)
     private static func sourcePriority(_ sourceName: String?) -> Int {
         switch sourceName {
-        case "111Movies": return 20
-        case "VidLink": return 30
+        case "VidLove": return 20
         case "Torrentio": return 40
         default: return 10
         }

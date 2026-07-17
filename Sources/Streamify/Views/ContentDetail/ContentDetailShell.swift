@@ -62,7 +62,7 @@ extension ContentDetailView {
             }
             HStack(spacing: 12) {
                 // Skip: only shown while a specific URL is being checked (second line present).
-                // During Torrentio/VidLink/111Movies fetches there is no URL to skip, so the button
+                // During provider fetches there is no URL to skip, so the button
                 // would do nothing — hide it to avoid confusing the user.
                 if urlCheckSkipper != nil && parts.count > 1 {
                     Button("Skip") {

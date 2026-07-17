@@ -13,8 +13,7 @@ struct SettingsView: View {
     @AppStorage("preferredAudioLanguages") private var preferredAudioLanguages: String = "English"
     @AppStorage("preferredGenres") private var preferredGenresRaw: String = ""
     @AppStorage("tmdbApiKey") private var tmdbApiKey: String = ""
-    @AppStorage("vidLinkEnabled") private var vidLinkEnabled: Bool = true
-    @AppStorage("movies111Enabled") private var movies111Enabled: Bool = true
+    @AppStorage("vidLoveEnabled") private var vidLoveEnabled: Bool = true
     @AppStorage("torrentioEnabled") private var torrentioEnabled: Bool = false
     @AppStorage("torrentioDebridProvider") private var torrentioDebridProvider: String = TorrentioService.DebridProvider.realdebrid.rawValue
     @AppStorage("torrentioRealDebridApiKey") private var torrentioRealDebridApiKey: String = ""
@@ -165,47 +164,20 @@ struct SettingsView: View {
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
 
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text("VidLink")
+                                        Text("VidLove")
                                             .font(.headline)
                                             .foregroundStyle(.white)
 
-                                        Text("Fast online HLS source via TMDB ID")
+                                        Text("Online streaming source via TMDB ID")
                                             .font(.caption)
                                             .foregroundStyle(.gray)
                                     }
 
                                     Spacer()
 
-                                    Toggle("", isOn: $vidLinkEnabled)
+                                    Toggle("", isOn: $vidLoveEnabled)
                                         .labelsHidden()
                                         .tint(.blue)
-                                }
-
-                                Divider().background(Color.gray.opacity(0.3))
-
-                                HStack(spacing: 12) {
-                                    Image(systemName: "film.stack")
-                                        .font(.title2)
-                                        .foregroundStyle(.purple)
-                                        .frame(width: 36, height: 36)
-                                        .background(Color.purple.opacity(0.15))
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("111Movies")
-                                            .font(.headline)
-                                            .foregroundStyle(.white)
-
-                                        Text("Alternative online HLS source via TMDB ID")
-                                            .font(.caption)
-                                            .foregroundStyle(.gray)
-                                    }
-
-                                    Spacer()
-
-                                    Toggle("", isOn: $movies111Enabled)
-                                        .labelsHidden()
-                                        .tint(.purple)
                                 }
 
                                 Divider().background(Color.gray.opacity(0.3))
@@ -644,6 +616,9 @@ struct SettingsView: View {
                     showDebridProviderPicker = false
                 }
             )
+        }
+        .onChange(of: tmdbApiKey) { _ in
+            TMDBService.notifyAPIKeyChanged()
         }
         .onAppear {
             syncPortText()

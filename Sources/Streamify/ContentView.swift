@@ -96,6 +96,7 @@ struct ContentView: View {
             .frame(width: width)
             .frame(maxHeight: .infinity, alignment: .top)
             .offset(x: tabOffset(for: tab, width: width))
+            .opacity(tab == selectedTab ? 1 : 0)
             .zIndex(tab == selectedTab ? 2 : 1)
             .allowsHitTesting(tab == selectedTab)
             .accessibilityHidden(tab != selectedTab)

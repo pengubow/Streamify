@@ -65,8 +65,7 @@ extension VideoPlayerView {
                     tmdbId: tmdbId,
                     season: ep.season,
                     episode: ep.episode,
-                    vidLinkEnabled: vidLinkEnabled,
-                    movies111Enabled: movies111Enabled,
+                    vidLoveEnabled: vidLoveEnabled,
                     torrentioEnabled: torrentioEnabled,
                     onCheckingURL: onCheckingURL,
                     onPreparingPlayback: onPreparingPlayback,
@@ -77,8 +76,7 @@ extension VideoPlayerView {
                     directUrls: directUrls,
                     sourceNamesMap: onlineUrlSourceNames,
                     tmdbId: tmdbId,
-                    vidLinkEnabled: vidLinkEnabled,
-                    movies111Enabled: movies111Enabled,
+                    vidLoveEnabled: vidLoveEnabled,
                     torrentioEnabled: torrentioEnabled,
                     onCheckingURL: onCheckingURL,
                     onPreparingPlayback: onPreparingPlayback,
@@ -274,7 +272,7 @@ extension VideoPlayerView {
         let isHLS = url.pathExtension.lowercased() == "m3u8" || url.absoluteString.contains(".m3u8")
         // Preserve existing qualities if none were explicitly provided — this prevents
         // the quality list from being wiped when the user switches between sources
-        // (e.g., tapping a VidLink quality from the picker).
+        // (e.g., tapping a provider quality from the picker).
         let qualitiesToPass = preloadedQualities ?? (viewModel.availableQualities.isEmpty ? nil : viewModel.availableQualities)
         
         StreamifyLogger.log("switchPlayerToUrl: captured realTime=\(realTime)s, switching to \(url.lastPathComponent) preloadedQualities=\(qualitiesToPass?.count ?? 0)")
@@ -296,11 +294,22 @@ extension VideoPlayerView {
         playerReadyCancellable = nil
         
         currentVideoURL = url
-        
+        applyDownloadedQualityHDRForCurrentPlayback()
+
         let intro = currentEpisodeInfo?.intro ?? content.metadata.intro
         let introDur = currentEpisodeInfo?.introDuration ?? content.metadata.introDuration
         let end = currentEpisodeInfo?.end ?? content.metadata.end
-        viewModel.setup(url: url, intro: intro, introDuration: introDur, end: end, preloadedQualities: qualitiesToPass, sourceNames: onlineUrlSourceNames)
+        let usesMPVStartupPosition = PlayerViewModel.shouldUseMPVDirectPlayback(for: url)
+        let startupPosition = realTime.isFinite ? max(realTime, 0) : 0
+        viewModel.setup(
+            url: url,
+            intro: intro,
+            introDuration: introDur,
+            end: end,
+            preloadedQualities: qualitiesToPass,
+            sourceNames: onlineUrlSourceNames,
+            initialPosition: usesMPVStartupPosition ? startupPosition : nil
+        )
         viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
         applyDownloadedQualityHDRForCurrentPlayback()
         
@@ -326,6 +335,17 @@ extension VideoPlayerView {
                 guard let viewModel = viewModel else { return }
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
+
+                if usesMPVStartupPosition {
+                    StreamifyLogger.log(
+                        "switchPlayerToUrl: MPV opened at \(startupPosition)s during load"
+                    )
+                    Task { @MainActor in
+                        self.markSeekedPlaybackNeedsVideoGate()
+                        self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
+                    }
+                    return
+                }
                 
                 if realTime > 0 {
                     let durationForClamp = max(readyDuration, viewModel.duration)
@@ -846,9 +866,9 @@ extension VideoPlayerView {
             contentId = content.id
             allEpisodes = nil
         }
-        
-        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(sourceUrl) || quality.sourceName == "VidLink" || quality.sourceName == "Torrentio"
-        let downloadTmdbId: Int? = needsProviderRefresh ? resolveTmdbId() : nil
+
+        let needsProviderRefresh = quality.sourceName == "VidLove" || quality.sourceName == "Torrentio"
+        let downloadTmdbId: Int? = (needsProviderRefresh || currentEpisodeInfo != nil) ? resolveTmdbId() : nil
         
         DownloadManager.shared.addQueuedDownload(
             contentId: contentId,
@@ -863,7 +883,10 @@ extension VideoPlayerView {
             tmdbId: downloadTmdbId,
             sourceName: quality.sourceName,
             selectedResolution: quality.resolution,
-            selectedVideoRange: quality.videoRange
+            selectedVideoRange: quality.videoRange,
+            episodeIntro: currentEpisodeInfo?.intro,
+            episodeIntroDuration: currentEpisodeInfo?.introDuration,
+            episodeEnd: currentEpisodeInfo?.end
         )
         
         // Start the queue immediately (like ContentDetailView's triggerProcessQueue)

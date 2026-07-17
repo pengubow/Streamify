@@ -29,43 +29,6 @@ actor SegmentIndexTracker {
     }
 }
 
-/// Actor that coordinates rate-limit backoff across VidLink segment downloads.
-/// Coordinates VidLink rate-limit detection across concurrent download tasks.
-/// When an HTML response or rate-limit status code is detected, throws
-/// `ImportError.rateLimitPauseAndResume` to stop the download task. The download manager
-/// catches this and does an actual pause-for-10-seconds-then-resume cycle, just like
-/// manual pause/unpause — flushing all stale connections and starting fresh.
-actor VidLinkRateLimitHandler {
-    /// Duration in seconds to wait when a rate limit / HTML response is detected.
-    static let backoffDuration: TimeInterval = 10
-
-    private var isRateLimited = false
-
-    /// Signal that a rate limit was hit. Throws `ImportError.rateLimitPauseAndResume` to
-    /// cancel the current download task. The download manager catches this and does an actual
-    /// pause-for-10-seconds-then-resume cycle, just like manual pause/unpause.
-    func triggerPauseAndResume() async throws -> Never {
-        if isRateLimited {
-            // Already being handled — just throw to stop this task too
-            StreamifyLogger.log("VidLinkRateLimitHandler: Rate limit already being handled, stopping this task")
-            throw ImportError.rateLimitPauseAndResume
-        }
-
-        isRateLimited = true
-
-        StreamifyLogger.log("VidLinkRateLimitHandler: Rate limit/HTML detected — will pause download for \(Int(Self.backoffDuration))s then resume (mimics pause/unpause)")
-
-        throw ImportError.rateLimitPauseAndResume
-    }
-
-    /// Check if rate limit has been triggered (other tasks should stop too).
-    func checkRateLimited() throws {
-        if isRateLimited {
-            throw ImportError.rateLimitPauseAndResume
-        }
-    }
-}
-
 // MARK: - Download item model
 class DownloadItem: ObservableObject, Identifiable, Codable {
     let id: String
@@ -80,10 +43,10 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
     let dateAdded: Date
     var fallbackUrls: [String]  // Alternative source URLs to try on failure
 
-    /// TMDB ID for VidLink token refresh on download resume (nil for non-VidLink sources)
+    /// TMDB ID for refreshing provider URLs on download start or resume.
     var tmdbId: Int?
 
-    /// Source attribution name (e.g., "VidLink", source file name) for identifying where this quality was downloaded from
+    /// Source attribution name (e.g., "VidLove", source file name) for identifying where this quality was downloaded from
     var sourceName: String?
 
     /// Resolution string from HLS variant (e.g., "1920x1080"), populated during download
@@ -91,6 +54,11 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
 
     /// VIDEO-RANGE from HLS master playlist (e.g., "PQ", "HLG", "SDR"), populated during download
     var selectedVideoRange: String?
+
+    /// Episode intro timing in seconds, resolved when the download file is selected.
+    var episodeIntro: Double?
+    var episodeIntroDuration: Double?
+    var episodeEnd: Double?
 
     /// Local playable file name when the downloaded file needed a container remux.
     var localFileNameOverride: String?
@@ -163,6 +131,9 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         case sourceName = "sn"
         case selectedResolution = "sr"
         case selectedVideoRange = "svr"
+        case episodeIntro = "ins"
+        case episodeIntroDuration = "ind"
+        case episodeEnd = "oen"
         case currentTrackName = "ctn"
         case resumeData = "rd"
     }
@@ -184,6 +155,9 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         quality: VideoQuality = .auto,
         selectedBandwidth: Double? = nil,
         qualityName: String? = nil,
+        episodeIntro: Double? = nil,
+        episodeIntroDuration: Double? = nil,
+        episodeEnd: Double? = nil,
         dateAdded: Date = Date(),
         fallbackUrls: [String] = []
     ) {
@@ -195,6 +169,9 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         self.quality = quality
         self.selectedBandwidth = selectedBandwidth
         self.qualityName = qualityName
+        self.episodeIntro = episodeIntro
+        self.episodeIntroDuration = episodeIntroDuration
+        self.episodeEnd = episodeEnd
         self.dateAdded = dateAdded
         self.fallbackUrls = fallbackUrls
     }
@@ -223,6 +200,9 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         sourceName = try c.decodeIfPresent(String.self, forKey: .sourceName)
         selectedResolution = try c.decodeIfPresent(String.self, forKey: .selectedResolution)
         selectedVideoRange = try c.decodeIfPresent(String.self, forKey: .selectedVideoRange)
+        episodeIntro = try c.decodeIfPresent(Double.self, forKey: .episodeIntro)
+        episodeIntroDuration = try c.decodeIfPresent(Double.self, forKey: .episodeIntroDuration)
+        episodeEnd = try c.decodeIfPresent(Double.self, forKey: .episodeEnd)
         currentTrackName = try c.decodeIfPresent(String.self, forKey: .currentTrackName)
         resumeData = try c.decodeIfPresent(Data.self, forKey: .resumeData)
     }
@@ -255,6 +235,9 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         try container.encodeIfPresent(sourceName, forKey: .sourceName)
         try container.encodeIfPresent(selectedResolution, forKey: .selectedResolution)
         try container.encodeIfPresent(selectedVideoRange, forKey: .selectedVideoRange)
+        try container.encodeIfPresent(episodeIntro, forKey: .episodeIntro)
+        try container.encodeIfPresent(episodeIntroDuration, forKey: .episodeIntroDuration)
+        try container.encodeIfPresent(episodeEnd, forKey: .episodeEnd)
     }
 }
 
@@ -439,6 +422,25 @@ private final class URLSessionDownloadTaskHolder: @unchecked Sendable {
     }
 }
 
+/// Stops every concurrent VidLove segment task when one request is throttled or
+/// returns an HTML error page. The download is resumed with a freshly resolved URL.
+actor VidLoveRateLimitHandler {
+    static let backoffDuration: TimeInterval = 10
+
+    private var isRateLimited = false
+
+    func triggerPauseAndResume() throws -> Never {
+        isRateLimited = true
+        throw ImportError.rateLimitPauseAndResume
+    }
+
+    func checkRateLimited() throws {
+        if isRateLimited {
+            throw ImportError.rateLimitPauseAndResume
+        }
+    }
+}
+
 // MARK: - Download Manager for background downloads
 @MainActor
 class DownloadManager: ObservableObject {
@@ -535,35 +537,6 @@ class DownloadManager: ObservableObject {
         config.timeoutIntervalForResource = 300
         return URLSession(configuration: config)
     }()
-
-    /// Dedicated URLSession for VidLink segment downloads with shorter timeouts.
-    /// VidLink connections can go stale (Cloudflare edge connection resets) —
-    /// a 30s request timeout ensures we detect stalled fetches quickly and retry.
-    /// NOT static — can be recreated to flush stale connections (mimics pause/unpause behavior).
-    private static var vidLinkSession: URLSession = makeVidLinkSession()
-
-    private static func makeVidLinkSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 120
-        // Force new connections instead of reusing potentially stale ones
-        config.httpMaximumConnectionsPerHost = 6
-        config.waitsForConnectivity = false
-        return URLSession(configuration: config)
-    }
-
-    /// Recreate the VidLink URLSession to flush stale connections.
-    /// Called during rate-limit recovery — mimics what pause/unpause does naturally
-    /// (cancelling old URLSession tasks and creating fresh connections).
-    static func resetVidLinkSession() {
-        // Cancel all tasks on the old session before replacing it.
-        // invalidateAndCancel immediately cancels all tasks and prevents the session
-        // from creating new connections, which is more reliable than getAllTasks+cancel.
-        let oldSession = vidLinkSession
-        vidLinkSession = makeVidLinkSession()
-        oldSession.invalidateAndCancel()
-        StreamifyLogger.log("DownloadManager: Reset VidLink URLSession (invalidated old session, created fresh)")
-    }
 
     // File paths
     private static var documentsURL: URL {
@@ -827,14 +800,12 @@ class DownloadManager: ObservableObject {
         return SelectedHLSVariant(variant: bestVariant, url: variantURL, content: variantContent)
     }
 
-    /// Fetch data from a URL, applying VidLink Referer header if the URL is a VidLink proxy URL.
-    /// VidLink proxy URLs always need `Referer: https://vidlink.pro/`.
+    /// Fetch data from a URL with any headers discovered for the provider stream.
     private func fetchData(from url: URL) async throws -> (Data, URLResponse) {
         return try await Self.fetchDataStatic(from: url)
     }
 
     /// Static version of fetchData for use in @Sendable closures (TaskGroup).
-    /// Auto-detects VidLink URLs and adds the Referer header when needed.
     private static func fetchDataStatic(from url: URL) async throws -> (Data, URLResponse) {
         var lastError: Error?
 
@@ -842,12 +813,8 @@ class DownloadManager: ObservableObject {
             try Task.checkCancellation()
 
             do {
-                if VidLinkService.isVidLinkProxyURL(url.absoluteString) {
-                    var request = URLRequest(url: url)
-                    request.setValue(VidLinkService.vidLinkReferer, forHTTPHeaderField: "Referer")
-                    return try await vidLinkSession.data(for: request)
-                }
-                return try await URLSession.shared.data(from: url)
+                let request = VidLoveService.makeRequest(for: url, timeoutInterval: 60)
+                return try await URLSession.shared.data(for: request)
             } catch {
                 try Task.checkCancellation()
                 lastError = error
@@ -908,7 +875,7 @@ class DownloadManager: ObservableObject {
                 if let resumeData {
                     task = session.downloadTask(withResumeData: resumeData)
                 } else {
-                    task = session.downloadTask(with: url)
+                    task = session.downloadTask(with: VidLoveService.makeRequest(for: url, timeoutInterval: 60))
                 }
                 taskHolder.set(task)
 
@@ -979,52 +946,34 @@ class DownloadManager: ObservableObject {
         return true
     }
 
-    /// Fetch a VidLink segment with validation and rate-limit retry.
-    /// If the response is an HTML page (Cloudflare), waits 10 seconds, regenerates the token,
-    /// gets a new m3u8, and retries downloading the segment with the new URL.
-    /// Uses a shared VidLinkRateLimitHandler to coordinate backoff and token regeneration.
-    private static func fetchVidLinkSegmentWithRetry(
+    private static func fetchVidLoveDataWithRateLimit(
         from url: URL,
-        rateLimitHandler: VidLinkRateLimitHandler
+        rateLimitHandler: VidLoveRateLimitHandler
     ) async throws -> (Data, URLResponse) {
-        // If rate limit was already triggered by another concurrent task, stop immediately
         try await rateLimitHandler.checkRateLimited()
-
         try Task.checkCancellation()
 
-        let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await fetchDataStatic(from: url)
+            let (data, response) = try await fetchDataStatic(from: url)
+            if let http = response as? HTTPURLResponse,
+               [403, 429, 503].contains(http.statusCode) {
+                StreamifyLogger.log("DownloadManager: VidLove request throttled with HTTP \(http.statusCode)")
+                try await rateLimitHandler.triggerPauseAndResume()
+            }
+            if !isValidSegmentData(data) {
+                StreamifyLogger.log("DownloadManager: VidLove returned invalid media data for \(url.lastPathComponent)")
+                try await rateLimitHandler.triggerPauseAndResume()
+            }
+            return (data, response)
         } catch {
             try Task.checkCancellation()
-            let nsError = error as NSError
-            let isTimeout = nsError.code == NSURLErrorTimedOut
-            let isConnectionLost = nsError.code == NSURLErrorNetworkConnectionLost
-            let isNotConnected = nsError.code == NSURLErrorNotConnectedToInternet
-
-            if isTimeout || isConnectionLost || isNotConnected {
-                StreamifyLogger.log("DownloadManager: VidLink fetch error (\(nsError.code)) for \(url.lastPathComponent), triggering pause-and-resume")
-                // Throw to trigger pause-and-resume cycle (like pause/unpause)
+            let code = (error as NSError).code
+            if [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet].contains(code) {
+                StreamifyLogger.log("DownloadManager: VidLove request failed with \(code); applying provider backoff")
                 try await rateLimitHandler.triggerPauseAndResume()
             }
             throw error
         }
-
-        // Check HTTP status code for rate limiting
-        if let httpResponse = response as? HTTPURLResponse,
-           (httpResponse.statusCode == 403 || httpResponse.statusCode == 429 || httpResponse.statusCode == 503) {
-            StreamifyLogger.log("DownloadManager: VidLink rate limit (HTTP \(httpResponse.statusCode)) for \(url.lastPathComponent), triggering pause-and-resume")
-            try await rateLimitHandler.triggerPauseAndResume()
-        }
-
-        // Validate the downloaded data isn't an HTML error page
-        if !isValidSegmentData(data) {
-            StreamifyLogger.log("DownloadManager: VidLink segment is HTML/invalid (\(data.count) bytes) for \(url.lastPathComponent), triggering pause-and-resume")
-            try await rateLimitHandler.triggerPauseAndResume()
-        }
-
-        return (data, response)
     }
 
     // MARK: - Add download (queued)
@@ -1045,7 +994,10 @@ class DownloadManager: ObservableObject {
         tmdbId: Int? = nil,
         sourceName: String? = nil,
         selectedResolution: String? = nil,
-        selectedVideoRange: String? = nil
+        selectedVideoRange: String? = nil,
+        episodeIntro: Double? = nil,
+        episodeIntroDuration: Double? = nil,
+        episodeEnd: Double? = nil
     ) {
         let activeStatuses: Set<DownloadStatus> = [.queued, .downloading, .paused, .pending]
         if downloads.contains(where: {
@@ -1070,6 +1022,9 @@ class DownloadManager: ObservableObject {
                 quality: .auto,
                 selectedBandwidth: bw,
                 qualityName: resolvedQualityName,
+                episodeIntro: episodeIntro,
+                episodeIntroDuration: episodeIntroDuration,
+                episodeEnd: episodeEnd,
                 fallbackUrls: fallbackUrls
             )
         } else {
@@ -1078,7 +1033,11 @@ class DownloadManager: ObservableObject {
                 videoUrl: videoUrl,
                 episodeIndex: episodeIndex,
                 episodeTitle: episodeTitle,
-                quality: quality
+                quality: quality,
+                episodeIntro: episodeIntro,
+                episodeIntroDuration: episodeIntroDuration,
+                episodeEnd: episodeEnd,
+                fallbackUrls: fallbackUrls
             )
         }
         download.seasonIndex = seasonIndex
@@ -1156,26 +1115,29 @@ class DownloadManager: ObservableObject {
             return
         }
 
-        guard VidLinkService.isVidLinkProxyURL(download.videoUrl) || download.sourceName == "VidLink" else {
+        guard download.sourceName == "VidLove" else {
             return
         }
 
-        StreamifyLogger.log("DownloadManager: Regenerating VidLink token for TMDB \(tmdbId)")
-        let result: VidLinkService.VidLinkResult?
+        StreamifyLogger.log("DownloadManager: Refreshing VidLove URL for TMDB \(tmdbId)")
+        let result: VidLoveService.VidLoveResult?
         if let episodeIndex = download.episodeIndex, let seasonIndex = download.seasonIndex {
-            result = await VidLinkService.fetchEpisodeStream(tmdbId: tmdbId, season: seasonIndex, episode: episodeIndex)
+            result = await VidLoveService.fetchEpisodeStream(tmdbId: tmdbId, season: seasonIndex, episode: episodeIndex)
         } else {
-            result = await VidLinkService.fetchMovieStream(tmdbId: tmdbId)
+            result = await VidLoveService.fetchMovieStream(tmdbId: tmdbId)
         }
         if let result,
-           let quality = VidLinkService.matchingQuality(
+           let quality = VidLoveService.matchingQuality(
             in: result,
             previousURL: download.videoUrl,
             qualityName: download.qualityName,
             resolution: download.selectedResolution
            ),
            let newUrl = quality.sourceUrl ?? quality.variantUrl {
-            download.videoUrl = newUrl
+            if download.videoUrl != newUrl {
+                download.videoUrl = newUrl
+                download.resumeData = nil
+            }
             if download.selectedResolution == nil {
                 download.selectedResolution = quality.resolution
             }
@@ -1183,12 +1145,81 @@ class DownloadManager: ObservableObject {
                 download.selectedVideoRange = quality.videoRange
             }
             saveDownloads()
-            StreamifyLogger.log("DownloadManager: Refreshed VidLink \(quality.name) URL for \(download.displayTitle)")
-        } else if let newUrl = result?.hlsUrl {
-            download.videoUrl = newUrl
+            StreamifyLogger.log("DownloadManager: Refreshed VidLove \(quality.name) URL for \(download.displayTitle)")
+        } else if let newUrl = result?.streamUrl {
+            if download.videoUrl != newUrl {
+                download.videoUrl = newUrl
+                download.resumeData = nil
+            }
             saveDownloads()
-            StreamifyLogger.log("DownloadManager: Refreshed VidLink URL for \(download.displayTitle)")
+            StreamifyLogger.log("DownloadManager: Refreshed VidLove URL for \(download.displayTitle)")
         }
+    }
+
+    private func refreshIntroDBTimingIfNeeded(for download: DownloadItem) async {
+        guard let season = download.seasonIndex,
+              let episode = download.episodeIndex else {
+            return
+        }
+
+        var changed = false
+        let metadata = download.contentMetadata
+        if download.episodeIntro == nil, let intro = metadata?.intro {
+            download.episodeIntro = intro
+            changed = true
+        }
+        if download.episodeIntroDuration == nil, let duration = metadata?.introDuration {
+            download.episodeIntroDuration = duration
+            changed = true
+        }
+        if download.episodeEnd == nil, let end = metadata?.end {
+            download.episodeEnd = end
+            changed = true
+        }
+
+        if let existing = metadata?.allEpisodes.first(where: {
+            $0.season == season && $0.episode == episode
+        }) {
+            if download.episodeIntro == nil, let intro = existing.intro {
+                download.episodeIntro = intro
+                changed = true
+            }
+            if download.episodeIntroDuration == nil, let duration = existing.introDuration {
+                download.episodeIntroDuration = duration
+                changed = true
+            }
+            if download.episodeEnd == nil, let end = existing.end {
+                download.episodeEnd = end
+                changed = true
+            }
+        }
+
+        let needsIntro = download.episodeIntro == nil || download.episodeIntroDuration == nil
+        let needsOutro = download.episodeEnd == nil
+        guard needsIntro || needsOutro,
+              let tmdbId = download.tmdbId,
+              let timing = await IntroDBService.fetchEpisodeTiming(
+            tmdbId: tmdbId,
+            season: season,
+            episode: episode
+        ) else {
+            if changed { saveDownloads() }
+            return
+        }
+
+        if download.episodeIntro == nil, let intro = timing.intro?.start {
+            download.episodeIntro = intro
+            changed = true
+        }
+        if download.episodeIntroDuration == nil, let duration = timing.intro?.duration {
+            download.episodeIntroDuration = duration
+            changed = true
+        }
+        if download.episodeEnd == nil, let end = timing.outroStart {
+            download.episodeEnd = end
+            changed = true
+        }
+        if changed { saveDownloads() }
     }
 
     // MARK: - Start download
@@ -1214,6 +1245,7 @@ class DownloadManager: ObservableObject {
             }
 
             do {
+                await self.refreshIntroDBTimingIfNeeded(for: download)
                 await self.refreshProviderURLIfNeeded(for: download)
                 guard let url = URL(string: download.videoUrl) else {
                     throw URLError(.badURL)
@@ -1252,21 +1284,15 @@ class DownloadManager: ObservableObject {
 
                 StreamifyLogger.log("Download failed for \(download.displayTitle): \(error.localizedDescription)")
 
-                // VidLink rate limit — silently wait then auto-resume (no UI status change)
-                if let importErr = error as? ImportError, importErr == .rateLimitPauseAndResume {
-                    StreamifyLogger.log("DownloadManager: VidLink rate limit — waiting 10s then auto-resuming \(download.displayTitle)")
+                if let importError = error as? ImportError,
+                   importError == .rateLimitPauseAndResume,
+                   download.sourceName == "VidLove" {
+                    StreamifyLogger.log("DownloadManager: VidLove backoff for \(download.displayTitle)")
                     self.saveDownloads()
-
-                    // Wait before resuming (like manual pause/unpause)
-                    try? await Task.sleep(nanoseconds: UInt64(VidLinkRateLimitHandler.backoffDuration * 1_000_000_000))
-
-                    // Check if user manually cancelled during the wait
-                    if Task.isCancelled { return }
-                    if download.status == .paused || download.status == .failed { return }
-
-                    // Auto-resume the download (picks up from saved segment indices)
-                    StreamifyLogger.log("DownloadManager: Auto-resuming VidLink download after 10s wait for \(download.displayTitle)")
-                    // Set to paused briefly so resumeDownload accepts it
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(VidLoveRateLimitHandler.backoffDuration * 1_000_000_000)
+                    )
+                    if Task.isCancelled || download.status == .paused || download.status == .failed { return }
                     download.status = .paused
                     self.downloadTasks.removeValue(forKey: downloadId)
                     self.downloadTaskTokens.removeValue(forKey: downloadId)
@@ -1443,6 +1469,26 @@ class DownloadManager: ObservableObject {
             }
         }
         try Task.checkCancellation()
+        if let http = response as? HTTPURLResponse,
+           !(200..<300).contains(http.statusCode) {
+            try? FileManager.default.removeItem(at: tempURL)
+            if download.sourceName == "VidLove", [403, 429, 503].contains(http.statusCode) {
+                StreamifyLogger.log("DownloadManager: VidLove direct file throttled with HTTP \(http.statusCode)")
+                throw ImportError.rateLimitPauseAndResume
+            }
+            throw ImportError.downloadFailed
+        }
+        if download.sourceName == "VidLove" {
+            let contentType = (response as? HTTPURLResponse)?
+                .value(forHTTPHeaderField: "Content-Type")?
+                .lowercased() ?? ""
+            let invalidType = contentType.contains("text/html") || contentType.contains("application/json")
+            if invalidType || !Self.downloadedFileLooksLikeMedia(tempURL) {
+                try? FileManager.default.removeItem(at: tempURL)
+                StreamifyLogger.log("DownloadManager: VidLove direct file returned invalid media content")
+                throw ImportError.rateLimitPauseAndResume
+            }
+        }
         if let finalUrl = response.url, TorrentioService.isFailedAccessURL(finalUrl.absoluteString) {
             StreamifyLogger.log("DownloadManager: Torrentio failed-access file detected at \(finalUrl.absoluteString)")
             try? FileManager.default.removeItem(at: tempURL)
@@ -1476,9 +1522,22 @@ class DownloadManager: ObservableObject {
         }
     }
 
+    private static func downloadedFileLooksLikeMedia(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        do {
+            guard let sample = try handle.read(upToCount: 2_048) else { return false }
+            return isValidSegmentData(sample)
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - Download HLS stream
 
     private func downloadHLSStream(download: DownloadItem, url: URL) async throws {
+        let usesVidLoveRateLimit = download.sourceName == "VidLove"
+        let rateLimitHandler = VidLoveRateLimitHandler()
         let folderPath = Self.folderPath(for: download)
         let destDir = Self.contentDirectoryURL.appendingPathComponent(folderPath)
         try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
@@ -1495,8 +1554,7 @@ class DownloadManager: ObservableObject {
         // Check if cancelled before fetching master playlist
         try Task.checkCancellation()
 
-        // Fetch master playlist (use VidLink referer if this is a VidLink download)
-        let needsProxyHeaders = download.tmdbId != nil
+        // Fetch the master playlist with any provider headers registered for this URL.
         let (masterData, _) = try await fetchData(from: url)
         try Task.checkCancellation()
 
@@ -1506,9 +1564,8 @@ class DownloadManager: ObservableObject {
 
         // Validate the master playlist is actual HLS content, not an HTML error page
         if !masterContent.contains("#EXTM3U") {
-            if needsProxyHeaders {
-                StreamifyLogger.log("DownloadManager: Master playlist is not valid HLS content (VidLink rate-limited) — triggering retry")
-                throw ImportError.rateLimitPauseAndResume
+            if usesVidLoveRateLimit {
+                try await rateLimitHandler.triggerPauseAndResume()
             }
             StreamifyLogger.log("DownloadManager: Master playlist is not valid HLS content")
             throw ImportError.downloadFailed
@@ -1534,9 +1591,8 @@ class DownloadManager: ObservableObject {
         
         // Validate the playlist is actually HLS content, not an HTML error page
         if !variantContent.contains("#EXTM3U") && !variantContent.contains("#EXTINF") {
-            if needsProxyHeaders {
-                StreamifyLogger.log("DownloadManager: Variant playlist is not valid HLS content (VidLink rate-limited) — triggering retry")
-                throw ImportError.rateLimitPauseAndResume
+            if usesVidLoveRateLimit {
+                try await rateLimitHandler.triggerPauseAndResume()
             }
             StreamifyLogger.log("DownloadManager: Variant playlist is not valid HLS content")
             throw ImportError.downloadFailed
@@ -1563,18 +1619,12 @@ class DownloadManager: ObservableObject {
         try FileManager.default.createDirectory(at: segmentsDir, withIntermediateDirectories: true)
 
         // Download fMP4 initialization segment if present (required for .m4s playback)
-        // Uses VidLink rate-limit-aware fetch if the download is from VidLink
         var localInitSegmentName: String? = nil
         if let initURI = initSegmentURI,
            let initURL = resolveSegmentURL(initURI, baseURL: url, variantURL: variantURL) {
-            let (initData, _): (Data, URLResponse)
-            if needsProxyHeaders {
-                let initHandler = VidLinkRateLimitHandler()
-                (initData, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                    from: initURL, rateLimitHandler: initHandler)
-            } else {
-                (initData, _) = try await fetchData(from: initURL)
-            }
+            let (initData, _) = usesVidLoveRateLimit
+                ? try await Self.fetchVidLoveDataWithRateLimit(from: initURL, rateLimitHandler: rateLimitHandler)
+                : try await fetchData(from: initURL)
             try Task.checkCancellation()
             let initExt = initURL.pathExtension.isEmpty ? "mp4" : initURL.pathExtension
             let initSegName = "init.\(initExt)"
@@ -1597,13 +1647,11 @@ class DownloadManager: ObservableObject {
         }
 
         // Download segments using TaskGroup with actor for thread safety
-        // VidLink downloads use same concurrency as non-VidLink; rate-limit backoff is coordinated via VidLinkRateLimitHandler
         let concurrentCount = effectiveConcurrentDownloadCount(for: download)
 
         // Track segment extensions for playlist creation
         var segmentExtensions: [String?] = Array(repeating: nil, count: segments.count)
         let indexTracker = SegmentIndexTracker()
-        let rateLimitHandler = VidLinkRateLimitHandler()
 
         try await withThrowingTaskGroup(of: (index: Int, ext: String).self) { group in
             // Add initial tasks up to concurrent limit
@@ -1617,13 +1665,12 @@ class DownloadManager: ObservableObject {
                     let segmentURLResolved = resolvedSegmentURLs[index]
 
                     do {
-                        let (data, _): (Data, URLResponse)
-                        if needsProxyHeaders {
-                            (data, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                                from: segmentURLResolved, rateLimitHandler: rateLimitHandler)
-                        } else {
-                            (data, _) = try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
-                        }
+                        let (data, _) = usesVidLoveRateLimit
+                            ? try await DownloadManager.fetchVidLoveDataWithRateLimit(
+                                from: segmentURLResolved,
+                                rateLimitHandler: rateLimitHandler
+                            )
+                            : try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
                         try Task.checkCancellation()
 
                         // Determine extension
@@ -1669,13 +1716,12 @@ class DownloadManager: ObservableObject {
                         let segmentURLResolved = resolvedSegmentURLs[segmentIndex]
 
                         do {
-                            let (data, _): (Data, URLResponse)
-                            if needsProxyHeaders {
-                                (data, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                                    from: segmentURLResolved, rateLimitHandler: rateLimitHandler)
-                            } else {
-                                (data, _) = try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
-                            }
+                            let (data, _) = usesVidLoveRateLimit
+                                ? try await DownloadManager.fetchVidLoveDataWithRateLimit(
+                                    from: segmentURLResolved,
+                                    rateLimitHandler: rateLimitHandler
+                                )
+                                : try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
                             try Task.checkCancellation()
 
                             let originalExtension = segmentURLResolved.pathExtension.isEmpty ? "ts" : segmentURLResolved.pathExtension
@@ -2305,7 +2351,7 @@ class DownloadManager: ObservableObject {
         }
 
         // Build DownloadedVideoQuality entry when a named quality was downloaded,
-        // so the player's quality picker can show the source badge (e.g., "VidLink")
+        // so the player's quality picker can show the source badge (e.g., "VidLove")
         let newDownloadedQuality: DownloadedVideoQuality? = {
             guard let qName = download.qualityName, !qName.isEmpty,
                   let localSource = localHlsUrl ?? localFile else { return nil }
@@ -2413,6 +2459,9 @@ class DownloadManager: ObservableObject {
 
                     episodes[episodeIdx] = currentEpisode.copying(
                         localFile: .some(localHlsUrl ?? localFile ?? currentEpisode.localFile),
+                        intro: .some(currentEpisode.intro ?? download.episodeIntro),
+                        introDuration: .some(currentEpisode.introDuration ?? download.episodeIntroDuration),
+                        end: .some(currentEpisode.end ?? download.episodeEnd),
                         qualityName: .some(effectiveQualityName ?? currentEpisode.qualityName),
                         subtitles: .some(mergeSubtitleTracks(new: updatedSubtitles, existing: currentEpisode.subtitles)),
                         audioTracks: .some(mergeAudioTracks(new: updatedAudioTracks, existing: currentEpisode.audioTracks)),
@@ -2428,9 +2477,9 @@ class DownloadManager: ObservableObject {
                         file: localFile,
                         hlsUrl: localHlsUrl,
                         localFile: localHlsUrl ?? localFile,
-                        intro: nil,
-                        introDuration: nil,
-                        end: nil,
+                        intro: download.episodeIntro,
+                        introDuration: download.episodeIntroDuration,
+                        end: download.episodeEnd,
                         qualityName: effectiveQualityName,
                         subtitles: updatedSubtitles,
                         audioTracks: updatedAudioTracks,
@@ -2448,6 +2497,9 @@ class DownloadManager: ObservableObject {
                             let currentEp = sEpisodes[eIdx]
                             sEpisodes[eIdx] = currentEp.copying(
                                 localFile: .some(localHlsUrl ?? localFile ?? currentEp.localFile),
+                                intro: .some(currentEp.intro ?? download.episodeIntro),
+                                introDuration: .some(currentEp.introDuration ?? download.episodeIntroDuration),
+                                end: .some(currentEp.end ?? download.episodeEnd),
                                 qualityName: .some(effectiveQualityName ?? currentEp.qualityName),
                                 subtitles: .some(mergeSubtitleTracks(new: updatedSubtitles, existing: currentEp.subtitles)),
                                 audioTracks: .some(mergeAudioTracks(new: updatedAudioTracks, existing: currentEp.audioTracks)),
@@ -2497,6 +2549,9 @@ class DownloadManager: ObservableObject {
                         file: .some(localFile ?? currentEpisode.file),
                         hlsUrl: .some(localHlsUrl ?? currentEpisode.hlsUrl),
                         localFile: .some(localHlsUrl ?? localFile),
+                        intro: .some(currentEpisode.intro ?? download.episodeIntro),
+                        introDuration: .some(currentEpisode.introDuration ?? download.episodeIntroDuration),
+                        end: .some(currentEpisode.end ?? download.episodeEnd),
                         qualityName: .some(effectiveQualityName ?? currentEpisode.qualityName),
                         subtitles: .some(mergeSubtitleTracks(new: updatedSubtitles, existing: currentEpisode.subtitles)),
                         audioTracks: .some(mergeAudioTracks(new: updatedAudioTracks, existing: currentEpisode.audioTracks)),
@@ -2512,9 +2567,9 @@ class DownloadManager: ObservableObject {
                         file: localFile,
                         hlsUrl: localHlsUrl,
                         localFile: localHlsUrl ?? localFile,
-                        intro: nil,
-                        introDuration: nil,
-                        end: nil,
+                        intro: download.episodeIntro,
+                        introDuration: download.episodeIntroDuration,
+                        end: download.episodeEnd,
                         qualityName: effectiveQualityName,
                         subtitles: updatedSubtitles,
                         audioTracks: updatedAudioTracks,
@@ -2535,6 +2590,9 @@ class DownloadManager: ObservableObject {
                         let currentEp = sEpisodes[eIdx]
                         sEpisodes[eIdx] = currentEp.copying(
                             localFile: .some(localHlsUrl ?? localFile ?? currentEp.localFile),
+                            intro: .some(currentEp.intro ?? download.episodeIntro),
+                            introDuration: .some(currentEp.introDuration ?? download.episodeIntroDuration),
+                            end: .some(currentEp.end ?? download.episodeEnd),
                             qualityName: .some(effectiveQualityName ?? currentEp.qualityName),
                             subtitles: .some(mergeSubtitleTracks(new: updatedSubtitles, existing: currentEp.subtitles)),
                             audioTracks: .some(mergeAudioTracks(new: updatedAudioTracks, existing: currentEp.audioTracks)),
@@ -2985,6 +3043,7 @@ class DownloadManager: ObservableObject {
             }
 
             do {
+                await self.refreshIntroDBTimingIfNeeded(for: download)
                 await self.refreshProviderURLIfNeeded(for: download)
 
                 guard let url = URL(string: download.videoUrl) else {
@@ -3030,17 +3089,15 @@ class DownloadManager: ObservableObject {
 
                 StreamifyLogger.log("Download failed for \(download.displayTitle): \(error.localizedDescription)")
 
-                // VidLink rate limit — silently wait then auto-resume (no UI error)
-                if let importErr = error as? ImportError, importErr == .rateLimitPauseAndResume {
-                    StreamifyLogger.log("DownloadManager: VidLink rate limit on resume — waiting 10s then auto-resuming \(download.displayTitle)")
+                if let importError = error as? ImportError,
+                   importError == .rateLimitPauseAndResume,
+                   download.sourceName == "VidLove" {
+                    StreamifyLogger.log("DownloadManager: VidLove resume backoff for \(download.displayTitle)")
                     self.saveDownloads()
-
-                    try? await Task.sleep(nanoseconds: UInt64(VidLinkRateLimitHandler.backoffDuration * 1_000_000_000))
-
-                    if Task.isCancelled { return }
-                    if download.status == .paused || download.status == .failed { return }
-
-                    StreamifyLogger.log("DownloadManager: Auto-resuming VidLink download after 10s wait for \(download.displayTitle)")
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(VidLoveRateLimitHandler.backoffDuration * 1_000_000_000)
+                    )
+                    if Task.isCancelled || download.status == .paused || download.status == .failed { return }
                     download.status = .paused
                     self.downloadTasks.removeValue(forKey: downloadId)
                     self.downloadTaskTokens.removeValue(forKey: downloadId)
@@ -3086,7 +3143,8 @@ class DownloadManager: ObservableObject {
     // MARK: - Resume HLS stream from last saved segment
 
     private func resumeHLSStream(download: DownloadItem, url: URL) async throws {
-        let needsProxyHeaders = download.tmdbId != nil
+        let usesVidLoveRateLimit = download.sourceName == "VidLove"
+        let rateLimitHandler = VidLoveRateLimitHandler()
 
         let folderPath = Self.folderPath(for: download)
         let destDir = Self.contentDirectoryURL.appendingPathComponent(folderPath)
@@ -3118,9 +3176,8 @@ class DownloadManager: ObservableObject {
 
         // Validate the master playlist is actual HLS content
         if !masterContent.contains("#EXTM3U") {
-            if needsProxyHeaders {
-                StreamifyLogger.log("DownloadManager: Resume master playlist is not valid HLS content (VidLink rate-limited) — triggering retry")
-                throw ImportError.rateLimitPauseAndResume
+            if usesVidLoveRateLimit {
+                try await rateLimitHandler.triggerPauseAndResume()
             }
             StreamifyLogger.log("DownloadManager: Resume master playlist is not valid HLS content")
             throw ImportError.downloadFailed
@@ -3147,9 +3204,8 @@ class DownloadManager: ObservableObject {
 
         // Validate the variant playlist is actual HLS content
         if !variantContent.contains("#EXTM3U") && !variantContent.contains("#EXTINF") {
-            if needsProxyHeaders {
-                StreamifyLogger.log("DownloadManager: Resume variant playlist is not valid HLS content (VidLink rate-limited) — triggering retry")
-                throw ImportError.rateLimitPauseAndResume
+            if usesVidLoveRateLimit {
+                try await rateLimitHandler.triggerPauseAndResume()
             }
             StreamifyLogger.log("DownloadManager: Resume variant playlist is not valid HLS content")
             throw ImportError.downloadFailed
@@ -3170,14 +3226,12 @@ class DownloadManager: ObservableObject {
             localInitSegmentName = initSegName
             let initPath = segmentsDir.appendingPathComponent(initSegName)
             if !FileManager.default.fileExists(atPath: initPath.path) {
-                let (initData, _): (Data, URLResponse)
-                if needsProxyHeaders {
-                    let initHandler = VidLinkRateLimitHandler()
-                    (initData, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                        from: initURL, rateLimitHandler: initHandler)
-                } else {
-                    (initData, _) = try await DownloadManager.fetchDataStatic(from: initURL)
-                }
+                let (initData, _) = usesVidLoveRateLimit
+                    ? try await Self.fetchVidLoveDataWithRateLimit(
+                        from: initURL,
+                        rateLimitHandler: rateLimitHandler
+                    )
+                    : try await Self.fetchDataStatic(from: initURL)
                 try Task.checkCancellation()
                 try initData.write(to: initPath)
                 StreamifyLogger.log("Downloaded fMP4 init segment on resume: \(initSegName)")
@@ -3211,12 +3265,11 @@ class DownloadManager: ObservableObject {
             throw ImportError.downloadFailed
         }
 
-        // Download remaining segments — VidLink uses same concurrency; rate-limit backoff is coordinated via VidLinkRateLimitHandler
+        // Download remaining segments.
         let concurrentCount = effectiveConcurrentDownloadCount(for: download)
 
         let indexTracker = SegmentIndexTracker()
         let remainingIndices = segmentsToDownload
-        let rateLimitHandler = VidLinkRateLimitHandler()
 
         try await withThrowingTaskGroup(of: Int.self) { group in
             for _ in 0..<min(concurrentCount, remainingIndices.count) {
@@ -3232,13 +3285,12 @@ class DownloadManager: ObservableObject {
                     let segmentURLResolved = resolvedSegmentURLs[index]
 
                     do {
-                        let (data, _): (Data, URLResponse)
-                        if needsProxyHeaders {
-                            (data, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                                from: segmentURLResolved, rateLimitHandler: rateLimitHandler)
-                        } else {
-                            (data, _) = try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
-                        }
+                        let (data, _) = usesVidLoveRateLimit
+                            ? try await DownloadManager.fetchVidLoveDataWithRateLimit(
+                                from: segmentURLResolved,
+                                rateLimitHandler: rateLimitHandler
+                            )
+                            : try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
                         try Task.checkCancellation()
 
                         let originalExtension = segmentURLResolved.pathExtension.isEmpty ? "ts" : segmentURLResolved.pathExtension
@@ -3283,13 +3335,12 @@ class DownloadManager: ObservableObject {
                         let segmentURLResolved = resolvedSegmentURLs[segmentIndex]
 
                         do {
-                            let (data, _): (Data, URLResponse)
-                            if needsProxyHeaders {
-                                (data, _) = try await DownloadManager.fetchVidLinkSegmentWithRetry(
-                                    from: segmentURLResolved, rateLimitHandler: rateLimitHandler)
-                            } else {
-                                (data, _) = try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
-                            }
+                            let (data, _) = usesVidLoveRateLimit
+                                ? try await DownloadManager.fetchVidLoveDataWithRateLimit(
+                                    from: segmentURLResolved,
+                                    rateLimitHandler: rateLimitHandler
+                                )
+                                : try await DownloadManager.fetchDataStatic(from: segmentURLResolved)
                             try Task.checkCancellation()
 
                             let originalExtension = segmentURLResolved.pathExtension.isEmpty ? "ts" : segmentURLResolved.pathExtension

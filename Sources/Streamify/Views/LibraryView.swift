@@ -28,8 +28,7 @@ struct LibraryView: View {
     @State private var urlCheckSkipper: URLCheckSkipper? = nil
 
     // Source toggles
-    @AppStorage("vidLinkEnabled") private var vidLinkEnabled: Bool = true
-    @AppStorage("movies111Enabled") private var movies111Enabled: Bool = true
+    @AppStorage("vidLoveEnabled") private var vidLoveEnabled: Bool = true
     @AppStorage("torrentioEnabled") private var torrentioEnabled: Bool = false
     @AppStorage("preferredGenres") private var preferredGenresRaw: String = ""
 
@@ -52,6 +51,7 @@ struct LibraryView: View {
     @State private var tmdbPreferredGenreSections: [(genre: Genre, content: [SourceContent])] = []
     @State private var tmdbLoaded: Bool = false
     @State private var tmdbIsLoading: Bool = false
+    @State private var tmdbLoadTask: Task<Void, Never>?
     @State private var tmdbSearchResults: [SourceContent] = []
     @State private var tmdbSearchTask: Task<Void, Never>?
     @State private var featuredBackdropColor: UIColor?
@@ -263,8 +263,7 @@ struct LibraryView: View {
             watchingProgressData = WatchingProgressManager.load()
             viewUpdateID += 1
             refreshFeaturedContent()
-            loadTMDBDataIfNeeded()
-            viewModel.enrichWithTMDB()
+            reloadTMDBData(debounce: false)
 
             checkServerHealthNow()
         }
@@ -285,18 +284,10 @@ struct LibraryView: View {
             }
         }
         .onChange(of: tmdbApiKey) { _ in
-            // Reload TMDB data when API key changes
-            tmdbLoaded = false
-            tmdbIsLoading = false
-            loadTMDBDataIfNeeded()
-            viewModel.enrichWithTMDB()
+            reloadTMDBData()
         }
         .onChange(of: preferredGenresRaw) { _ in
-            tmdbLoaded = false
-            tmdbIsLoading = false
-            tmdbPreferredGenreSections = []
-            tmdbTrending = []
-            loadTMDBDataIfNeeded()
+            reloadTMDBData(debounce: false)
             refreshFeaturedContent()
         }
         .onChange(of: refreshTrigger) { _ in
@@ -313,6 +304,9 @@ struct LibraryView: View {
         .onReceive(NotificationCenter.default.publisher(for: .watchingProgressUpdated)) { _ in
             watchingProgressData = WatchingProgressManager.load()
         }
+        .onReceive(NotificationCenter.default.publisher(for: TMDBService.apiKeyDidChangeNotification)) { _ in
+            reloadTMDBData()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
             keyboardOverlapHeightInHome = keyboardOverlapHeight(from: notification)
             keyboardIsVisibleInHome = keyboardOverlapHeightInHome > 1
@@ -324,8 +318,21 @@ struct LibraryView: View {
         .onChange(of: searchFieldFocused) { _ in
             updateHomeKeyboardCounterOffset()
         }
+        .overlay {
+            if playerContext != nil {
+                Color.black
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .transaction { transaction in
+                        transaction.disablesAnimations = true
+                    }
+            }
+        }
         .fullScreenCover(item: $playerContext) { context in
-            playerView(for: context)
+            ZStack {
+                Color.black.ignoresSafeArea()
+                playerView(for: context)
+            }
         }
     }
 
@@ -854,8 +861,7 @@ struct LibraryView: View {
             directUrls: directUrls,
             sourceNamesMap: sourceNames,
             tmdbId: tmdbId,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             onCheckingURL: { [weak skipper] candidate in
                 guard self.loadingMessage != nil else { return }
@@ -945,8 +951,7 @@ struct LibraryView: View {
                 tmdbId: tmdbId,
                 season: episode.season,
                 episode: episode.episode,
-                vidLinkEnabled: vidLinkEnabled,
-                movies111Enabled: movies111Enabled,
+                vidLoveEnabled: vidLoveEnabled,
                 torrentioEnabled: torrentioEnabled,
                 onCheckingURL: { [weak skipper] candidate in
                     guard self.loadingMessage != nil else { return }
@@ -1031,8 +1036,7 @@ struct LibraryView: View {
             tmdbId: tmdbId,
             season: nextEpisode.season,
             episode: nextEpisode.episode,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,
@@ -1081,8 +1085,7 @@ struct LibraryView: View {
             tmdbId: tmdbId,
             season: nextEpisode.season,
             episode: nextEpisode.episode,
-            vidLinkEnabled: vidLinkEnabled,
-            movies111Enabled: movies111Enabled,
+            vidLoveEnabled: vidLoveEnabled,
             torrentioEnabled: torrentioEnabled,
             onCheckingURL: onCheckingURL,
             onPreparingPlayback: onPreparingPlayback,
@@ -1134,7 +1137,7 @@ struct LibraryView: View {
         return viewModel.library.contains { $0.id == content.id }
     }
 
-    // MARK: - Resolve TMDB ID for VidLink
+    // MARK: - Resolve TMDB ID for streaming providers
     private func resolveTmdbId(for content: SavedContent) -> Int? {
         PlaybackResolver.resolveTmdbId(for: content)
     }
@@ -1226,12 +1229,46 @@ struct LibraryView: View {
 
     // MARK: - TMDB Data Loading
 
-    private func loadTMDBDataIfNeeded() {
-        guard isTMDBConfigured, !tmdbLoaded else { return }
+    private func reloadTMDBData(debounce: Bool = true) {
+        tmdbLoadTask?.cancel()
+        tmdbLoadTask = nil
+        tmdbLoaded = false
+        tmdbIsLoading = false
+        tmdbTrending = []
+        tmdbPopularMovies = []
+        tmdbPopularTVShows = []
+        tmdbPreferredGenreSections = []
+        tmdbSearchTask?.cancel()
+        tmdbSearchResults = []
+
+        guard TMDBService.isConfigured else {
+            refreshFeaturedContent()
+            return
+        }
+        loadTMDBDataIfNeeded(debounce: debounce)
+    }
+
+    private func loadTMDBDataIfNeeded(debounce: Bool = false) {
+        let configuredKey = TMDBService.apiKey
+        guard !configuredKey.isEmpty, !tmdbLoaded else { return }
         let selectedPreferredGenres = preferredGenres
         tmdbLoaded = true
         tmdbIsLoading = true
-        Task {
+        tmdbLoadTask?.cancel()
+        tmdbLoadTask = Task {
+            if debounce {
+                do {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
+
+            await MainActor.run {
+                viewModel.enrichWithTMDB()
+            }
+
             // Fetch genres, popular movies and TV shows in parallel
             async let movieGenres = TMDBService.fetchMovieGenres()
             async let tvGenres = TMDBService.fetchTVGenres()
@@ -1244,6 +1281,7 @@ struct LibraryView: View {
             let tr = await trending
             let pm = await popularMovies
             let ptv = await popularTVShows
+            guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
 
             // Convert to SourceContent
             let trendingContent = tr.map { TMDBService.toSourceContent($0, movieGenres: mg, tvGenres: tg) }
@@ -1258,13 +1296,16 @@ struct LibraryView: View {
 
             var preferredSections: [(genre: Genre, content: [SourceContent])] = []
             for genre in selectedPreferredGenres {
+                guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                 var contents: [SourceContent] = []
                 if let movieGenreId = tmdbMovieGenreId(for: genre, in: mg) {
                     let movies = await TMDBService.fetchMoviesByGenre(genreId: movieGenreId)
+                    guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                     contents.append(contentsOf: movies.map { TMDBService.toSourceContent($0, movieGenres: mg) })
                 }
                 if let tvGenreId = tmdbTVGenreId(for: genre, in: tg) {
                     let shows = await TMDBService.fetchTVShowsByGenre(genreId: tvGenreId)
+                    guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                     contents.append(contentsOf: shows.map { TMDBService.toSourceContent($0, tvGenres: tg) })
                 }
                 let uniqueContents = uniqueSourceContents(contents)
@@ -1273,9 +1314,12 @@ struct LibraryView: View {
                 }
             }
 
+            guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
             await MainActor.run {
+                guard TMDBService.apiKey == configuredKey else { return }
                 tmdbPreferredGenreSections = preferredSections
                 tmdbIsLoading = false
+                tmdbLoadTask = nil
                 refreshFeaturedContent()
             }
         }

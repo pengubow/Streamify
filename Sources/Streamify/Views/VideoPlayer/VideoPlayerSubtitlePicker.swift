@@ -17,8 +17,7 @@ extension VideoPlayerView {
                 Button {
                     selectedSubtitleLanguage = ""
                     selectedSubtitleTrackId = ""
-                    applySubtitleTrack(nil)
-                    showSubtitleSheet = false
+                    dismissSubtitlePickersAndApply(nil)
                 } label: {
                     HStack {
                         Text("Off")
@@ -36,6 +35,8 @@ extension VideoPlayerView {
 
                 let _ = pickerRefreshId // force refresh on delete
                 let subs = availableSubtitles
+                let selectedTrackIdExists = !selectedSubtitleTrackId.isEmpty &&
+                    subs.contains { $0.trackId == selectedSubtitleTrackId }
                 let downloadedSubs = subs.filter { isSubtitleLocallyAvailable($0) }
                 
                 // Downloaded subtitle section
@@ -48,7 +49,11 @@ extension VideoPlayerView {
                         StreamifyPickerBatchedForEach(sortedKeys, id: \.self) { displayName in
                             let groupTracks = grouped[displayName] ?? []
                             if groupTracks.count == 1 {
-                                subtitlePickerRow(track: groupTracks[0], showButtons: true)
+                                subtitlePickerRow(
+                                    track: groupTracks[0],
+                                    selectedTrackIdExists: selectedTrackIdExists,
+                                    showButtons: true
+                                )
                             } else {
                                 let isExpanded = expandedSubtitleGroup == "dl_\(displayName)"
                                 Button {
@@ -65,11 +70,19 @@ extension VideoPlayerView {
                                     .streamifyPickerButtonLabel()
                                 }
                                 .buttonStyle(StreamifyPressScaleButtonStyle(scale: 0.98))
-                                .streamifyPickerRow(selected: isExpanded || groupTracks.contains { isSubtitleTrackSelected($0) })
+                                .streamifyPickerRow(
+                                    selected: isExpanded || groupTracks.contains {
+                                        isSubtitleTrackSelected($0, selectedTrackIdExists: selectedTrackIdExists)
+                                    }
+                                )
 
                                 StreamifyPickerExpandableGroup(isExpanded: isExpanded) {
                                     StreamifyPickerBatchedForEach(groupTracks, id: \.trackId) { track in
-                                        subtitlePickerRow(track: track, showButtons: true)
+                                        subtitlePickerRow(
+                                            track: track,
+                                            selectedTrackIdExists: selectedTrackIdExists,
+                                            showButtons: true
+                                        )
                                             .streamifyPickerExpandedItem(indented: true)
                                     }
                                 }
@@ -100,7 +113,12 @@ extension VideoPlayerView {
                             StreamifyPickerBatchedForEach(sortedKeys, id: \.self) { displayName in
                                 let groupTracks = grouped[displayName] ?? []
                                 if groupTracks.count == 1 {
-                                    subtitlePickerRow(track: groupTracks[0], showButtons: true, isDownloadedSection: false)
+                                    subtitlePickerRow(
+                                        track: groupTracks[0],
+                                        selectedTrackIdExists: selectedTrackIdExists,
+                                        showButtons: true,
+                                        isDownloadedSection: false
+                                    )
                             } else {
                                 let isExpanded = expandedSubtitleGroup == "st_\(displayName)"
                                 Button {
@@ -117,11 +135,20 @@ extension VideoPlayerView {
                                         .streamifyPickerButtonLabel()
                                     }
                                     .buttonStyle(StreamifyPressScaleButtonStyle(scale: 0.98))
-                                    .streamifyPickerRow(selected: isExpanded || groupTracks.contains { isSubtitleTrackSelected($0) })
+                                    .streamifyPickerRow(
+                                        selected: isExpanded || groupTracks.contains {
+                                            isSubtitleTrackSelected($0, selectedTrackIdExists: selectedTrackIdExists)
+                                        }
+                                    )
 
                                     StreamifyPickerExpandableGroup(isExpanded: isExpanded) {
                                         StreamifyPickerBatchedForEach(groupTracks, id: \.trackId) { track in
-                                            subtitlePickerRow(track: track, showButtons: true, isDownloadedSection: false)
+                                            subtitlePickerRow(
+                                                track: track,
+                                                selectedTrackIdExists: selectedTrackIdExists,
+                                                showButtons: true,
+                                                isDownloadedSection: false
+                                            )
                                                 .streamifyPickerExpandedItem(indented: true)
                                         }
                                     }
@@ -139,29 +166,32 @@ extension VideoPlayerView {
             trailingTitle: "Done",
             trailingAction: { showSubtitleVariantSheet = false }
         ) {
+            let subs = availableSubtitles
+            let selectedTrackIdExists = !selectedSubtitleTrackId.isEmpty &&
+                subs.contains { $0.trackId == selectedSubtitleTrackId }
             StreamifyPickerBatchedForEach(subtitleVariantTracks, id: \.trackId) { track in
-                subtitlePickerRow(track: track)
+                subtitlePickerRow(track: track, selectedTrackIdExists: selectedTrackIdExists)
             }
         }
     }
-    
+
     @ViewBuilder
-    func subtitlePickerRow(track: SubtitleTrack, showButtons: Bool = false, isDownloadedSection: Bool = true) -> some View {
+    func subtitlePickerRow(
+        track: SubtitleTrack,
+        selectedTrackIdExists: Bool,
+        showButtons: Bool = false,
+        isDownloadedSection: Bool = true
+    ) -> some View {
         let isLocal = isSubtitleLocallyAvailable(track)
+        let isSelected = isSubtitleTrackSelected(
+            track,
+            selectedTrackIdExists: selectedTrackIdExists
+        )
         HStack {
             Button {
                 selectedSubtitleLanguage = track.language
                 selectedSubtitleTrackId = track.trackId
-                applySubtitleTrack(track)
-                // Dismiss variant sheet first (if open), then parent
-                if showSubtitleVariantSheet {
-                    showSubtitleVariantSheet = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        showSubtitleSheet = false
-                    }
-                } else {
-                    showSubtitleSheet = false
-                }
+                dismissSubtitlePickersAndApply(track)
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -175,7 +205,7 @@ extension VideoPlayerView {
                         SourceBadge(sourceName: sn)
                     }
                     Spacer()
-                    if isSubtitleTrackSelected(track) {
+                    if isSelected {
                         Image(systemName: "checkmark")
                             .foregroundStyle(.white)
                     }
@@ -252,15 +282,15 @@ extension VideoPlayerView {
                 }
             }
         }
-        .streamifyPickerRow(selected: isSubtitleTrackSelected(track))
+        .streamifyPickerRow(selected: isSelected)
     }
 
-    func isSubtitleTrackSelected(_ track: SubtitleTrack) -> Bool {
+    func isSubtitleTrackSelected(_ track: SubtitleTrack, selectedTrackIdExists: Bool) -> Bool {
         if !selectedSubtitleTrackId.isEmpty {
             if track.trackId == selectedSubtitleTrackId {
                 return true
             }
-            if availableSubtitles.contains(where: { $0.trackId == selectedSubtitleTrackId }) {
+            if selectedTrackIdExists {
                 return false
             }
         }
@@ -271,9 +301,23 @@ extension VideoPlayerView {
         "id \(TrackIdentity.shortDisplayId(track.trackId)) · lang \(track.languageId)"
     }
 
+    func dismissSubtitlePickersAndApply(_ track: SubtitleTrack?) {
+        let shouldResume = consumePickerResumeIntent()
+        showSubtitleVariantSheet = false
+        showSubtitleSheet = false
+
+        DispatchQueue.main.async {
+            if shouldResume {
+                playWithSyncedAudio()
+            }
+            applySubtitleTrack(track)
+        }
+    }
+
     // MARK: - Apply subtitle track
     func applySubtitleTrack(_ track: SubtitleTrack?, completion: @escaping @MainActor () -> Void = {}) {
         cancelNativeMatroskaSubtitlePreparation()
+        cancelSubtitleLoad()
         subtitleCues = []
         currentSubtitleText = ""
         
@@ -380,6 +424,13 @@ extension VideoPlayerView {
         nativeMatroskaSubtitleTask?.cancel()
         nativeMatroskaSubtitleTask = nil
         nativeMatroskaSubtitleTrackId = nil
+        isSubtitlePreparing = false
+    }
+
+    func cancelSubtitleLoad() {
+        subtitleLoadGeneration += 1
+        subtitleLoadTask?.cancel()
+        subtitleLoadTask = nil
         isSubtitlePreparing = false
     }
 
@@ -545,8 +596,10 @@ extension VideoPlayerView {
     }
     
     func loadVTTSubtitles(from url: URL, completion: @escaping @MainActor () -> Void = {}) {
+        cancelSubtitleLoad()
+        let generation = subtitleLoadGeneration
         isSubtitlePreparing = true
-        Task {
+        subtitleLoadTask = Task {
             do {
                 let content: String
                 if url.isFileURL {
@@ -554,10 +607,22 @@ extension VideoPlayerView {
                         try String(contentsOf: url, encoding: .utf8)
                     }.value
                 } else {
-                    let (data, _) = try await URLSession.shared.data(from: url)
+                    var request = URLRequest(
+                        url: url,
+                        cachePolicy: .returnCacheDataElseLoad,
+                        timeoutInterval: 15
+                    )
+                    request.setValue("text/vtt,text/plain;q=0.9,*/*;q=0.5", forHTTPHeaderField: "Accept")
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    if let response = response as? HTTPURLResponse,
+                       !(200...299).contains(response.statusCode) {
+                        throw URLError(.badServerResponse)
+                    }
                     guard let loadedContent = String(data: data, encoding: .utf8) else {
                         await MainActor.run {
+                            guard generation == self.subtitleLoadGeneration else { return }
                             self.isSubtitlePreparing = false
+                            self.subtitleLoadTask = nil
                             StreamifyLogger.log("Subtitle: Failed to decode VTT from \(url.absoluteString)")
                             completion()
                         }
@@ -566,12 +631,16 @@ extension VideoPlayerView {
                     content = loadedContent
                 }
 
+                try Task.checkCancellation()
                 let cues = await Task.detached(priority: .userInitiated) {
                     parseVTT(content)
                 }.value
+                try Task.checkCancellation()
 
                 await MainActor.run {
+                    guard generation == self.subtitleLoadGeneration else { return }
                     self.isSubtitlePreparing = false
+                    self.subtitleLoadTask = nil
                     self.subtitleCues = cues
                     let source = url.isFileURL ? "local file" : "remote URL"
                     StreamifyLogger.log("Subtitle: Loaded \(cues.count) cues from \(source)")
@@ -579,7 +648,12 @@ extension VideoPlayerView {
                 }
             } catch {
                 await MainActor.run {
+                    guard generation == self.subtitleLoadGeneration else { return }
                     self.isSubtitlePreparing = false
+                    self.subtitleLoadTask = nil
+                    if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                        return
+                    }
                     StreamifyLogger.log("Subtitle: Failed to load VTT: \(error.localizedDescription)")
                     completion()
                 }

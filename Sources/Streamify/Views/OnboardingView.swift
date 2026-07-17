@@ -7,8 +7,7 @@ struct StreamifyOnboardingView: View {
     @AppStorage("preferredAudioLanguages") private var preferredAudioLanguages: String = "English"
     @AppStorage("preferredGenres") private var preferredGenresRaw: String = ""
     @AppStorage("tmdbApiKey") private var tmdbApiKey: String = ""
-    @AppStorage("vidLinkEnabled") private var vidLinkEnabled: Bool = true
-    @AppStorage("movies111Enabled") private var movies111Enabled: Bool = true
+    @AppStorage("vidLoveEnabled") private var vidLoveEnabled: Bool = true
     @AppStorage("torrentioEnabled") private var torrentioEnabled: Bool = false
     @AppStorage("torrentioDebridProvider") private var torrentioDebridProvider: String = TorrentioService.DebridProvider.realdebrid.rawValue
     @AppStorage("torrentioRealDebridApiKey") private var torrentioRealDebridApiKey: String = ""
@@ -24,8 +23,7 @@ struct StreamifyOnboardingView: View {
     @State private var selectedLanguages: Set<String> = []
     @State private var selectedGenres: Set<Genre> = []
     @State private var selectedTMDBApiKey: String = ""
-    @State private var selectedVidLinkEnabled: Bool = true
-    @State private var selectedMovies111Enabled: Bool = true
+    @State private var selectedVidLoveEnabled: Bool = true
     @State private var selectedTorrentioEnabled: Bool = false
     @State private var selectedTorrentioDebridProviderRaw: String = TorrentioService.DebridProvider.realdebrid.rawValue
     @State private var selectedRealDebridApiKey: String = ""
@@ -92,8 +90,7 @@ struct StreamifyOnboardingView: View {
             }
             selectedGenres = StreamifyPreferences.genres(from: preferredGenresRaw)
             selectedTMDBApiKey = tmdbApiKey
-            selectedVidLinkEnabled = vidLinkEnabled
-            selectedMovies111Enabled = movies111Enabled
+            selectedVidLoveEnabled = vidLoveEnabled
             selectedTorrentioEnabled = torrentioEnabled
             selectedTorrentioDebridProviderRaw = torrentioDebridProvider
             selectedRealDebridApiKey = torrentioRealDebridApiKey
@@ -188,8 +185,7 @@ struct StreamifyOnboardingView: View {
     private var providersSection: some View {
         onboardingPanel(title: "Sources", subtitle: "Choose the online providers Streamify should try while resolving playback.") {
             VStack(spacing: 12) {
-                onboardingToggle(title: "VidLink", subtitle: "Fast online HLS source", isOn: $selectedVidLinkEnabled, tint: .blue)
-                onboardingToggle(title: "111Movies", subtitle: "Alternative online HLS source", isOn: $selectedMovies111Enabled, tint: .purple)
+                onboardingToggle(title: "VidLove", subtitle: "Online streaming source", isOn: $selectedVidLoveEnabled, tint: .blue)
                 onboardingToggle(title: "Torrentio", subtitle: "Stremio/Torrentio streams, best with debrid", isOn: $selectedTorrentioEnabled, tint: .orange)
 
                 if selectedTorrentioEnabled {
@@ -406,8 +402,8 @@ struct StreamifyOnboardingView: View {
             preferredAudioLanguages = languageRawValue
             preferredGenresRaw = StreamifyPreferences.rawValue(forGenres: selectedGenres)
             tmdbApiKey = selectedTMDBApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            vidLinkEnabled = selectedVidLinkEnabled
-            movies111Enabled = selectedMovies111Enabled
+            TMDBService.notifyAPIKeyChanged()
+            vidLoveEnabled = selectedVidLoveEnabled
             torrentioEnabled = shouldEnableTorrentio
             torrentioDebridProvider = selectedTorrentioDebridProviderRaw
             torrentioRealDebridApiKey = selectedRealDebridApiKey

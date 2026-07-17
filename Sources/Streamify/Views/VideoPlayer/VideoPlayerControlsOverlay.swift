@@ -458,9 +458,8 @@ extension VideoPlayerView {
                         .buttonStyle(StreamifyPressScaleButtonStyle(scale: 0.92))
                     }
 
-                    // Audio button - only shown when usable audio tracks exist.
-                    // During local playback, only locally downloaded audio tracks count.
-                    if hasUsableAudioTracks {
+                    // Audio button - only shown when the picker offers a real choice.
+                    if hasAudioTrackChoice {
                         Button {
                             showAudioSheet = true
                             cancelHideControls()

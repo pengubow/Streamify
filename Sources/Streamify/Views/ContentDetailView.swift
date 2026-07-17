@@ -36,8 +36,7 @@ struct ContentDetailView: View {
     @State var selectedDownloadSubtitles: Set<String> = []  // trackIds
     @State var selectedDownloadAudio: Set<String> = []  // trackIds
     @State var pendingDownloadUrl: String? = nil  // URL waiting for track selection
-    @State var pendingVidLinkHlsUrl: String? = nil  // VidLink HLS URL for quality picker inclusion
-    @State var pendingMovies111HlsUrl: String? = nil  // 111Movies HLS URL for quality picker inclusion
+    @State var pendingVidLoveUrl: String? = nil
     @State var pendingTorrentioHlsUrl: String? = nil  // Torrentio HLS URL for quality picker inclusion
     @State var pendingStreamingQualities: [HLSQuality] = []  // Direct/non-HLS stream options from providers
     @State var pendingSubtitleTracks: [SubtitleTrack] = []  // subtitle tracks resolved for this download
@@ -50,8 +49,7 @@ struct ContentDetailView: View {
 
     // Get download manager - use @ObservedObject to react to changes
     @ObservedObject var downloadManager = DownloadManager.shared
-    @AppStorage("vidLinkEnabled") var vidLinkEnabled: Bool = true
-    @AppStorage("movies111Enabled") var movies111Enabled: Bool = true
+    @AppStorage("vidLoveEnabled") var vidLoveEnabled: Bool = true
     @AppStorage("torrentioEnabled") var torrentioEnabled: Bool = false
 
     // TMDB-fetched seasons/episodes for series without local data
@@ -325,8 +323,21 @@ struct ContentDetailView: View {
         .onChange(of: loadingMessage) { msg in
             if let msg { loadingMessageSnapshot = msg }
         }
+        .overlay {
+            if playerContext != nil {
+                Color.black
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .transaction { transaction in
+                        transaction.disablesAnimations = true
+                    }
+            }
+        }
         .fullScreenCover(item: $playerContext) { context in
-            playerView(for: context)
+            ZStack {
+                Color.black.ignoresSafeArea()
+                playerView(for: context)
+            }
         }
     }
 

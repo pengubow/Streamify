@@ -30,7 +30,11 @@ struct VideoPlayerView: View {
     @State var showQualitySheet: Bool = false
     @State var pausedPlaybackForPicker: Bool = false
     @State var shouldResumeAfterPicker: Bool = false
+    @State var pausedPlaybackForSceneInterruption: Bool = false
+    @State var shouldResumeAfterSceneInterruption: Bool = false
     @State var hideWorkItem: DispatchWorkItem?
+    @State var acceptsPlayerControlInput: Bool = false
+    @State var enablePlayerControlInputTask: Task<Void, Never>?
     @State var saveProgressTimer: Timer?
     @State var isUserSeeking: Bool = false  // Track if user is dragging the seek bar
     @State var previewTime: Double = 0  // Time preview while seeking
@@ -51,13 +55,15 @@ struct VideoPlayerView: View {
     
     // Track if we're transitioning to next episode
     @State var isTransitioningToNext: Bool = false
+    @State var isAdvancingEpisode: Bool = false
     @State var transitionMessage: String = "Loading next episode..."
     /// Non-nil while `switchToOnlinePlay()` is in progress; cancel to abort the switch.
     @State var switchToOnlineTask: Task<Void, Never>? = nil
     /// Non-nil while `playNextEpisode()` or `addToLibraryAndPlayNext()` is resolving the next episode URL.
     @State var nextEpisodeTask: Task<Void, Never>? = nil
+    @State var introDBTask: Task<Void, Never>? = nil
     /// Non-nil while a specific URL is being validated during `switchToOnlinePlay()`.
-    /// Set to `nil` during service fetches (Torrentio/VidLink/111Movies) that can't be skipped individually.
+    /// Set to `nil` during provider fetches that can't be skipped individually.
     @State var onlineSwitchFetchingURL: String? = nil
     /// Allows the user to skip the current URL being validated in `switchToOnlinePlay()`.
     @State var onlineSwitchSkipper: URLCheckSkipper? = nil
@@ -91,8 +97,7 @@ struct VideoPlayerView: View {
     @AppStorage("selectedSubtitleLanguage") var selectedSubtitleLanguage: String = ""  // empty means subtitles off
     @AppStorage("selectedSubtitleTrackId") var selectedSubtitleTrackId: String = ""
     @AppStorage("preferredSubtitleLanguages") var preferredSubtitleLanguages: String = "English"
-    @AppStorage("vidLinkEnabled") var vidLinkEnabled: Bool = true
-    @AppStorage("movies111Enabled") var movies111Enabled: Bool = true
+    @AppStorage("vidLoveEnabled") var vidLoveEnabled: Bool = true
     @AppStorage("torrentioEnabled") var torrentioEnabled: Bool = false
     @State var subtitleCues: [SubtitleCue] = []
     @State var currentSubtitleText: String = ""
@@ -100,6 +105,8 @@ struct VideoPlayerView: View {
     @State var expandedSubtitleGroup: String?  // Track which subtitle group is expanded
     @State var nativeMatroskaSubtitleTask: Task<Void, Never>? = nil
     @State var nativeMatroskaSubtitleTrackId: String? = nil
+    @State var subtitleLoadTask: Task<Void, Never>? = nil
+    @State var subtitleLoadGeneration: Int = 0
     @State var isSubtitlePreparing: Bool = false
     
     // Audio state
@@ -341,7 +348,7 @@ struct VideoPlayerView: View {
                     merge(contentSubs)
                 }
             }
-            // Merge VidLink subtitles
+            // Merge streaming-provider subtitles
             if let vlSubs = currentStreamingSubtitles {
                 merge(vlSubs)
             }
@@ -370,7 +377,7 @@ struct VideoPlayerView: View {
             merge(sourceContent.subtitles ?? [])
         }
         
-        // Merge VidLink subtitles
+        // Merge streaming-provider subtitles
         if let vlSubs = currentStreamingSubtitles {
             merge(vlSubs)
         }
@@ -524,14 +531,13 @@ struct VideoPlayerView: View {
         return tracks
     }
     
-    /// Whether there are audio tracks usable in the current playback mode.
-    /// During local playback, only locally downloaded (non-embedded) tracks count.
-    /// During streaming, any non-embedded track counts.
-    var hasUsableAudioTracks: Bool {
+    /// Whether the audio picker offers a meaningful choice in the current playback mode.
+    /// A direct MPV file with one embedded audio ID is already using its only option.
+    var hasAudioTrackChoice: Bool {
         let _ = pickerRefreshId
         let tracks = availableAudioTracks.filter { !$0.isEmbedded }
         if viewModel.isUsingMPVPlayback {
-            return !tracks.isEmpty
+            return tracks.count > 1
         }
         if viewModel.isLocalFile {
             return tracks.contains { isAudioLocallyAvailable($0) }
@@ -829,6 +835,7 @@ struct VideoPlayerView: View {
     // Video layer — Custom Metal renderer
             if let engine = viewModel.mpvEngine {
                 MPVDirectPlayerView(engine: engine)
+                    .id(ObjectIdentifier(engine))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let engine = viewModel.customEngine {
                 CustomPlayerView(engine: engine)
@@ -858,6 +865,7 @@ struct VideoPlayerView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
+                    .allowsHitTesting(acceptsPlayerControlInput)
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.25)) { showControls = true }
                         scheduleHideControls()
@@ -873,6 +881,7 @@ struct VideoPlayerView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: showControls)
+            .allowsHitTesting(acceptsPlayerControlInput)
             .onChange(of: showControls) { visible in
                 if visible {
                     // Reset static "10" text when controls reappear
@@ -957,7 +966,7 @@ struct VideoPlayerView: View {
             // Loading indicator — hidden when controls are visible to avoid overlapping with pause button.
             if (viewModel.isBuffering || isAudioBuffering || isSubtitlePreparing) &&
                 !showControls &&
-                !isTransitioningToNext {
+                (!isTransitioningToNext || isAdvancingEpisode) {
                 VStack(spacing: 12) {
                     ProgressView()
                         .scaleEffect(1.5)
@@ -973,7 +982,7 @@ struct VideoPlayerView: View {
             }
 
             // Transition overlay — always visible on top of controls with translucent background
-            if isTransitioningToNext {
+            if isTransitioningToNext && !isAdvancingEpisode {
                 ZStack {
                     StreamifyGrayBlurBackdrop()
                     VStack(spacing: 20) {
@@ -1044,6 +1053,17 @@ struct VideoPlayerView: View {
         .ignoresSafeArea()
         .background(Color.black.ignoresSafeArea())
         .onAppear {
+            resetPlayerPickerPresentationState(context: "player entry")
+            showControls = false
+            acceptsPlayerControlInput = false
+            hideWorkItem?.cancel()
+            enablePlayerControlInputTask?.cancel()
+            enablePlayerControlInputTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 550_000_000)
+                guard !Task.isCancelled else { return }
+                acceptsPlayerControlInput = true
+                enablePlayerControlInputTask = nil
+            }
             // Lock to landscape and force rotation before setting up player
             OrientationManager.shared.rotate(to: .landscapeLeft)
             // Set initial quality name for local playback
@@ -1056,23 +1076,25 @@ struct VideoPlayerView: View {
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
+            case .inactive:
+                break
             case .background:
-                // App is backgrounding — trim decoder buffers on all players to
-                // release memory held by mediaserverd and reduce crash risk.
+                pauseForSceneInterruptionIfNeeded()
                 viewModel.customEngine?.trimDecoderBuffers()
                 trimSeparateAudioBuffers()
             case .active:
-                // App returned to foreground — restore buffers so playback can
-                // prefetch freely again.
-                if viewModel.isPlaying {
-                    viewModel.customEngine?.restoreDecoderBuffers()
-                    restoreSeparateAudioBuffers()
-                }
-            default:
+                recoverPlaybackAfterSceneInterruptionIfNeeded()
+            @unknown default:
                 break
             }
         }
         .onDisappear {
+            acceptsPlayerControlInput = false
+            enablePlayerControlInputTask?.cancel()
+            enablePlayerControlInputTask = nil
+            resetPlayerPickerPresentationState(context: "player exit")
+            pausedPlaybackForSceneInterruption = false
+            shouldResumeAfterSceneInterruption = false
             // Force portrait when leaving video player
             OrientationManager.shared.rotate(to: .portrait)
             // Save progress before leaving
@@ -1085,6 +1107,7 @@ struct VideoPlayerView: View {
             externalAudioPlayer?.pause()
             externalAudioPlayer = nil
             cancelNativeMatroskaSubtitlePreparation()
+            cancelSubtitleLoad()
             stopCompensatedEmbeddedAudio(unmuteMain: false)
             audioBufferingObservers.removeAll()
             teardownRemoteCommandHandlers()
@@ -1094,6 +1117,8 @@ struct VideoPlayerView: View {
             // Cancel any in-progress track download task
             downloadingTrackTask?.cancel()
             downloadingTrackTask = nil
+            introDBTask?.cancel()
+            introDBTask = nil
             // Call onDismiss to ensure LibraryView refreshes (handles swipe-to-dismiss)
             // Only call if not already called from back button
             if !hasCalledDismiss {

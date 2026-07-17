@@ -34,7 +34,7 @@ extension VideoPlayerView {
                 }
             }
             .padding(.trailing, 24)
-            .padding(.bottom, 80)
+            .padding(.bottom, 112)
         }
     }
 
@@ -76,7 +76,7 @@ extension VideoPlayerView {
                                 .disabled(isTransitioningToNext)
                             }
                             .padding(.trailing, 24)
-                            .padding(.bottom, 80)
+                            .padding(.bottom, 112)
                         }
                     } else if onAddToLibraryAndRequestNext != nil {
                         VStack {
@@ -111,7 +111,7 @@ extension VideoPlayerView {
                                 .disabled(isTransitioningToNext)
                             }
                             .padding(.trailing, 24)
-                            .padding(.bottom, 80)
+                            .padding(.bottom, 112)
                         }
                     }
                 } else {
@@ -135,7 +135,7 @@ extension VideoPlayerView {
                             }
                         }
                         .padding(.trailing, 24)
-                        .padding(.bottom, 80)
+                        .padding(.bottom, 112)
                     }
                 }
             } else if isMovie && onGoToBrowse != nil {
@@ -159,7 +159,7 @@ extension VideoPlayerView {
                         }
                     }
                     .padding(.trailing, 24)
-                    .padding(.bottom, 80)
+                    .padding(.bottom, 112)
                 }
             }
         }
@@ -168,11 +168,13 @@ extension VideoPlayerView {
     // MARK: - Play Next Episode (in same player)
     func playNextEpisode() {
         // Guard against multiple simultaneous transitions (e.g., rapid button taps)
-        guard !isTransitioningToNext else {
+        guard !isTransitioningToNext, !isAdvancingEpisode else {
             StreamifyLogger.log("playNextEpisode: Already transitioning, ignoring duplicate request")
             return
         }
+        resetPlayerPickerPresentationState(context: "next episode")
         isTransitioningToNext = true
+        isAdvancingEpisode = true
         transitionMessage = "Loading..."
         onlineSwitchFetchingURL = nil
 
@@ -197,6 +199,7 @@ extension VideoPlayerView {
         onlineSwitchSkipper = nil
         onlineSwitchFetchingURL = nil
         isTransitioningToNext = false
+        isAdvancingEpisode = false
         playWithSyncedAudio()
     }
 
@@ -216,9 +219,14 @@ extension VideoPlayerView {
               let request = await onRequestNextEpisode?(currentEp, skipper, onCheckingURL, onPreparingPlayback) else {
             StreamifyLogger.log("playNextEpisode: No next episode request returned")
             isTransitioningToNext = false
+            isAdvancingEpisode = false
             return
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            isTransitioningToNext = false
+            isAdvancingEpisode = false
+            return
+        }
         
         StreamifyLogger.log("playNextEpisode: Transitioning from episode \(currentEpisodeInfo?.episode ?? -1) to episode \(request.episode.episode)")
         
@@ -245,22 +253,32 @@ extension VideoPlayerView {
         // Cancel old subscription before setting up new player
         playerReadyCancellable?.cancel()
         playerReadyCancellable = nil
-        
+        introDBTask?.cancel()
+        introDBTask = nil
+
         // Stop current playback
         pausePlayback()
-        
+        stopProgressSaving()
+        cancelNativeMatroskaSubtitlePreparation()
+        cancelSubtitleLoad()
+
         // Clear subtitle state from previous episode
         subtitleCues = []
         currentSubtitleText = ""
-        
+        refreshedSubtitles = nil
+
         // Clear audio state from previous episode
         externalAudioPlayer?.pause()
         externalAudioPlayer = nil
         stopCompensatedEmbeddedAudio(unmuteMain: false)
+        audioBufferingObservers.removeAll()
+        isAudioBuffering = false
+        audioFallbackMessage = nil
+        refreshedAudioTracks = nil
+        refreshedDownloadedQualities = nil
         viewModel.isPlayerMuted = true
         
         // Update state for new episode
-        transitionMessage = "Starting..."
         currentVideoURL = request.videoURL
         currentEpisodeInfo = request.episode
         
@@ -272,6 +290,7 @@ extension VideoPlayerView {
             activePlayingQualityName = nil
             activePlayingQualityId = nil
         }
+        hasLocalFile = checkHasLocalFile()
         
         // Update streaming subtitles for new episode
         currentStreamingSubtitles = request.streamingSubtitles
@@ -283,18 +302,32 @@ extension VideoPlayerView {
             hlsAudioTracks = []
         }
         
-        // Stop the old timer
-        stopProgressSaving()
-        
         // Setup player with new URL
         let intro = request.episode.intro ?? content.metadata.intro
         let introDur = request.episode.introDuration ?? content.metadata.introDuration
         let end = request.episode.end ?? content.metadata.end
-        viewModel.setup(url: request.videoURL, intro: intro, introDuration: introDur, end: end, preloadedQualities: request.preloadedQualities, sourceNames: onlineUrlSourceNames)
-        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
-        let savedProgress = WatchingProgressManager.getProgress(for: content.id, seasonIndex: request.episode.season, episodeIndex: request.episode.episode)
+        let savedProgress = WatchingProgressManager.getProgress(
+            for: content.id,
+            seasonIndex: request.episode.season,
+            episodeIndex: request.episode.episode
+        )
         let savedTimestamp = savedProgress?.timestamp ?? 0
         let savedDuration = savedProgress?.duration ?? 0
+        let startupPosition = clampedResumeTime(savedTimestamp, duration: savedDuration)
+        let usesMPVStartupPosition = PlayerViewModel.shouldUseMPVDirectPlayback(for: request.videoURL)
+        hasProcessedReadyState = false
+        applyDownloadedQualityHDRForCurrentPlayback()
+        viewModel.setup(
+            url: request.videoURL,
+            intro: intro,
+            introDuration: introDur,
+            end: end,
+            preloadedQualities: request.preloadedQualities,
+            sourceNames: onlineUrlSourceNames,
+            initialPosition: usesMPVStartupPosition ? startupPosition : nil
+        )
+        loadIntroDBTimingIfNeeded()
+        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
         
         // Show the saved time in the UI immediately
         if savedTimestamp > 0 {
@@ -305,9 +338,6 @@ extension VideoPlayerView {
         }
         
         StreamifyLogger.log("playNextEpisode: New episode \(request.episode.episode) savedTimestamp=\(savedTimestamp)s")
-        
-        // Reset processed state
-        hasProcessedReadyState = false
         
         // Observe when player is ready
         playerReadyCancellable = Publishers.CombineLatest(viewModel.$isReadyToPlay, viewModel.$duration)
@@ -321,6 +351,19 @@ extension VideoPlayerView {
                 
                 let duration = max(readyDuration, viewModel.duration, savedDuration)
                 StreamifyLogger.log("playNextEpisode: Player ready, duration=\(duration)s")
+
+                if usesMPVStartupPosition {
+                    StreamifyLogger.log(
+                        "playNextEpisode: MPV opened at \(startupPosition)s during load"
+                    )
+                    Task { @MainActor in
+                        self.markSeekedPlaybackNeedsVideoGate()
+                        self.isTransitioningToNext = false
+                        self.isAdvancingEpisode = false
+                        self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
+                    }
+                    return
+                }
                 
                 if savedTimestamp > 0 {
                     let clampedTime = clampedResumeTime(savedTimestamp, duration: duration)
@@ -330,6 +373,7 @@ extension VideoPlayerView {
                             StreamifyLogger.log("playNextEpisode: Seek completed, starting playback")
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
+                            self.isAdvancingEpisode = false
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                         }
                     }
@@ -339,6 +383,7 @@ extension VideoPlayerView {
                         Task { @MainActor in
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
+                            self.isAdvancingEpisode = false
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                         }
                     }
@@ -351,7 +396,13 @@ extension VideoPlayerView {
 
     // MARK: - Add to Library and Play Next
     func addToLibraryAndPlayNext() {
+        guard !isTransitioningToNext, !isAdvancingEpisode else {
+            StreamifyLogger.log("addToLibraryAndPlayNext: Already transitioning, ignoring duplicate request")
+            return
+        }
+        resetPlayerPickerPresentationState(context: "add-to-library next episode")
         isTransitioningToNext = true
+        isAdvancingEpisode = true
         transitionMessage = "Adding to library..."
         onlineSwitchFetchingURL = nil
 
@@ -385,9 +436,14 @@ extension VideoPlayerView {
               let request = await onAddToLibraryAndRequestNext?(currentEp, skipper, onCheckingURL, onPreparingPlayback) else {
             StreamifyLogger.log("addToLibraryAndPlayNext: No next episode request returned")
             isTransitioningToNext = false
+            isAdvancingEpisode = false
             return
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            isTransitioningToNext = false
+            isAdvancingEpisode = false
+            return
+        }
         
         // Save progress for CURRENT episode before switching
         if let currentEp = currentEpisodeInfo {
@@ -410,23 +466,40 @@ extension VideoPlayerView {
         
         playerReadyCancellable?.cancel()
         playerReadyCancellable = nil
+        introDBTask?.cancel()
+        introDBTask = nil
         pausePlayback()
-        
-        transitionMessage = "Starting..."
-        
+        stopProgressSaving()
+        cancelNativeMatroskaSubtitlePreparation()
+        cancelSubtitleLoad()
+
         // Clear subtitle state from previous episode
         subtitleCues = []
         currentSubtitleText = ""
-        
+        refreshedSubtitles = nil
+
         // Clear audio state from previous episode
         externalAudioPlayer?.pause()
         externalAudioPlayer = nil
         stopCompensatedEmbeddedAudio(unmuteMain: false)
+        audioBufferingObservers.removeAll()
+        isAudioBuffering = false
+        audioFallbackMessage = nil
+        refreshedAudioTracks = nil
+        refreshedDownloadedQualities = nil
         viewModel.isPlayerMuted = true
-        
+
         currentVideoURL = request.videoURL
         currentEpisodeInfo = request.episode
-        stopProgressSaving()
+
+        let isLocal = request.videoURL.isFileURL || request.videoURL.host == "localhost"
+        if isLocal {
+            activePlayingQualityName = resolveActiveLocalQualityName()
+        } else {
+            activePlayingQualityName = nil
+            activePlayingQualityId = nil
+        }
+        hasLocalFile = checkHasLocalFile()
         
         // Update streaming subtitles for new episode
         currentStreamingSubtitles = request.streamingSubtitles
@@ -441,12 +514,28 @@ extension VideoPlayerView {
         let intro = request.episode.intro ?? content.metadata.intro
         let introDur = request.episode.introDuration ?? content.metadata.introDuration
         let end = request.episode.end ?? content.metadata.end
-        viewModel.setup(url: request.videoURL, intro: intro, introDuration: introDur, end: end, preloadedQualities: request.preloadedQualities, sourceNames: onlineUrlSourceNames)
-        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
-        
-        let savedProgress = WatchingProgressManager.getProgress(for: content.id, seasonIndex: request.episode.season, episodeIndex: request.episode.episode)
+        let savedProgress = WatchingProgressManager.getProgress(
+            for: content.id,
+            seasonIndex: request.episode.season,
+            episodeIndex: request.episode.episode
+        )
         let savedTimestamp = savedProgress?.timestamp ?? 0
         let savedDuration = savedProgress?.duration ?? 0
+        let startupPosition = clampedResumeTime(savedTimestamp, duration: savedDuration)
+        let usesMPVStartupPosition = PlayerViewModel.shouldUseMPVDirectPlayback(for: request.videoURL)
+        hasProcessedReadyState = false
+        applyDownloadedQualityHDRForCurrentPlayback()
+        viewModel.setup(
+            url: request.videoURL,
+            intro: intro,
+            introDuration: introDur,
+            end: end,
+            preloadedQualities: request.preloadedQualities,
+            sourceNames: onlineUrlSourceNames,
+            initialPosition: usesMPVStartupPosition ? startupPosition : nil
+        )
+        loadIntroDBTimingIfNeeded()
+        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
         
         // Show the saved time in the UI immediately
         if savedTimestamp > 0 {
@@ -456,8 +545,6 @@ extension VideoPlayerView {
             viewModel.duration = savedDuration
         }
         
-        hasProcessedReadyState = false
-        
         playerReadyCancellable = Publishers.CombineLatest(viewModel.$isReadyToPlay, viewModel.$duration)
             .filter { isReady, duration in
                 isReady && (duration > 0 || viewModel.isUsingMPVPlayback)
@@ -466,6 +553,19 @@ extension VideoPlayerView {
                 guard let viewModel = viewModel else { return }
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
+
+                if usesMPVStartupPosition {
+                    StreamifyLogger.log(
+                        "addToLibraryAndPlayNext: MPV opened at \(startupPosition)s during load"
+                    )
+                    Task { @MainActor in
+                        self.markSeekedPlaybackNeedsVideoGate()
+                        self.isTransitioningToNext = false
+                        self.isAdvancingEpisode = false
+                        self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
+                    }
+                    return
+                }
                 
                 if savedTimestamp > 0 {
                     let duration = max(readyDuration, viewModel.duration, savedDuration)
@@ -474,6 +574,7 @@ extension VideoPlayerView {
                         Task { @MainActor in
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
+                            self.isAdvancingEpisode = false
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                         }
                     }
@@ -483,6 +584,7 @@ extension VideoPlayerView {
                         Task { @MainActor in
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
+                            self.isAdvancingEpisode = false
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                         }
                     }

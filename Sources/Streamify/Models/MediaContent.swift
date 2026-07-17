@@ -19,7 +19,7 @@ nonisolated struct SourceContent: Codable, Identifiable, Hashable, Sendable {
     let subtitles: [SubtitleTrack]?
     let audioTracks: [AudioTrack]?
     let embeddedAudioDisabled: Bool  // Global flag: disable embedded audio for this content
-    let tmdbId: Int?  // TMDB movie/series ID for VidLink integration
+    let tmdbId: Int?  // TMDB movie/series ID for streaming-provider integration
 
     // For backward compatibility
     var genre: Genre? {
@@ -228,7 +228,7 @@ nonisolated struct DownloadedVideoQuality: Codable, Identifiable, Hashable, Send
     let resolution: String?
     let isHDR: Bool
     let localSource: String    // Relative path to video m3u8 (e.g., "video_1080p/video.m3u8")
-    let sourceName: String?    // Source attribution (e.g., "VidLink", "MySource")
+    let sourceName: String?    // Source attribution (e.g., "VidLove", "MySource")
     let sourceUrl: String?     // Remote URL this quality was downloaded from, used to match picker rows
 
     enum CodingKeys: String, CodingKey {
@@ -305,7 +305,7 @@ nonisolated struct SubtitleTrack: Codable, Identifiable, Hashable, Sendable {
     let languageId: String  // Language identifier (e.g., "en", "en-forced")
     let source: String
     let name: String?  // Optional descriptive name (e.g., "English (SDH)", "Forced")
-    let sourceName: String?  // Source attribution (e.g., "VidLink", "MySource")
+    let sourceName: String?  // Source attribution (e.g., "VidLove", "MySource")
     
     enum CodingKeys: String, CodingKey {
         case language = "l", source = "s", name = "n"
@@ -361,7 +361,7 @@ nonisolated struct AudioTrack: Codable, Identifiable, Hashable, Sendable {
     let isDisabled: Bool  // Whether embedded audio should be disabled (video has no sound)
     let name: String?  // Optional descriptive name (e.g., "English (Atmos)", "Japanese (Stereo)")
     let bandwidth: Double?  // Audio bandwidth in bits/sec (from HLS parsing)
-    let sourceName: String?  // Source attribution (e.g., "VidLink", "MySource")
+    let sourceName: String?  // Source attribution (e.g., "VidLove", "MySource")
     let originalTrackId: String?  // Source track id this local/prepared track was derived from
     
     enum CodingKeys: String, CodingKey {
@@ -701,7 +701,7 @@ nonisolated struct ContentMetadata: Codable, Identifiable, Hashable, Sendable {
     let audioTracks: [AudioTrack]?
     let embeddedAudioDisabled: Bool  // Global flag: disable embedded audio for this content
     let downloadedVideoQualities: [DownloadedVideoQuality]?
-    let tmdbId: Int?  // TMDB movie/series ID for VidLink integration
+    let tmdbId: Int?  // TMDB movie/series ID for streaming-provider integration
 
     var displayGenre: Genre? {
         genre ?? genres?.first
@@ -958,7 +958,7 @@ struct PlayerContext: Identifiable, Equatable {
     let totalEpisodes: Int
     /// Pre-parsed HLS audio tracks (parsed before opening the player)
     let preloadedAudioTracks: [AudioTrack]?
-    /// Subtitles from streaming sources (VidLink, 111Movies) to merge into the player's subtitle list
+    /// Subtitles from streaming providers to merge into the player's subtitle list
     let streamingSubtitles: [SubtitleTrack]?
     /// Pre-parsed HLS qualities (parsed before opening the player)
     let preloadedQualities: [HLSQuality]?

@@ -568,14 +568,7 @@ extension VideoPlayerView {
     }
 
     func makeCompensatedEmbeddedAudioPlayer(for url: URL) -> AVPlayer {
-        let asset: AVURLAsset
-        if VidLinkService.isVidLinkProxyURL(url.absoluteString) {
-            asset = AVURLAsset(url: url, options: [
-                "AVURLAssetHTTPHeaderFieldsKey": ["Referer": VidLinkService.vidLinkReferer]
-            ])
-        } else {
-            asset = AVURLAsset(url: url)
-        }
+        let asset = AVURLAsset(url: url, options: VidLoveService.assetOptions(for: url))
 
         let item = AVPlayerItem(asset: asset)
         if url.pathExtension.lowercased() == "m3u8"
@@ -733,9 +726,8 @@ extension VideoPlayerView {
         applyAudioTrack(nil, shouldResume: shouldStartPlayback)
     }
     func reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: Bool) {
-        reapplySubtitlesForCurrentEpisode {
-            self.reapplyAudioForCurrentEpisode(shouldStartPlayback: shouldStartPlayback)
-        }
+        reapplySubtitlesForCurrentEpisode()
+        reapplyAudioForCurrentEpisode(shouldStartPlayback: shouldStartPlayback)
     }
 
     func reapplySubtitlesForCurrentEpisode(completion: @escaping @MainActor () -> Void = {}) {

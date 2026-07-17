@@ -46,7 +46,7 @@ struct HLSQuality: Identifiable, Hashable {
     let frameRate: String?     // e.g., "24", "30", "60"
     let sourceUrl: String?     // The m3u8 URL this quality was parsed from
     let variantUrl: String?    // The variant media playlist URL (resolved from master)
-    let sourceName: String?    // Source attribution (e.g., "VidLink", "111Movies", source file name)
+    let sourceName: String?    // Source attribution (e.g., "VidLove", "Torrentio", source file name)
     let displayDetail: String? // Extra source detail for direct-file stream options
     
     init(name: String, bandwidth: Double, resolution: String?, videoRange: String?, frameRate: String?, sourceUrl: String?, variantUrl: String?, sourceName: String? = nil, displayDetail: String? = nil) {
@@ -289,7 +289,7 @@ struct MultiSourceQuality: Identifiable {
     let videoRange: String?
     let frameRate: String?
     let sourceUrls: [String]  // All m3u8 URLs that provide this quality
-    let sourceName: String?   // Source attribution (e.g., "VidLink", "111Movies", source file name)
+    let sourceName: String?   // Source attribution (e.g., "VidLove", "Torrentio", source file name)
     let displayDetail: String?
     
     init(name: String, bandwidth: Double, resolution: String?, videoRange: String?, frameRate: String?, sourceUrls: [String], sourceName: String? = nil, displayDetail: String? = nil) {
@@ -357,8 +357,8 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Custom Player (AVPlayerLayer-rendered)
     // Always uses AVPlayerLayer for native video rendering with full HDR support.
     // AVPlayerLayer handles HDR (PQ/HLG) natively — same rendering path as Safari.
-    private(set) var customEngine: CustomPlayerEngine?
-    private(set) var mpvEngine: MPVDirectPlayerEngine?
+    @Published private(set) var customEngine: CustomPlayerEngine?
+    @Published private(set) var mpvEngine: MPVDirectPlayerEngine?
 
     
     /// Convenience accessor — proxies to the custom engine's internal AVPlayer.
@@ -397,6 +397,9 @@ class PlayerViewModel: ObservableObject {
     
     private var isSeeking = false
     private var seekGeneration = 0
+    private var playbackSetupGeneration = 0
+    private var isMPVTeardownPending = false
+    private var mpvTeardownWaiters: [() -> Void] = []
 
     // HDR variant mode: when playing HDR variant playlists (PQ, HLG, or
     // any VIDEO-RANGE != SDR), AVPlayer's native ABR can switch between
@@ -409,7 +412,7 @@ class PlayerViewModel: ObservableObject {
     
     /// The source URL that auto mode is locked to.
     /// In auto mode, the player should only consider qualities from this source
-    /// to prevent ABR from jumping between different sources (e.g., own source → VidLink).
+    /// to prevent ABR from jumping between different sources (e.g., own source → VidLove).
     private(set) var activeAutoSourceUrl: String?
 
     private static func isTorrentioQuality(_ quality: HLSQuality) -> Bool {
@@ -455,6 +458,16 @@ class PlayerViewModel: ObservableObject {
         let time = engine.currentTime
         return time.isFinite ? time : currentTime
     }
+
+    private func remoteMPVSeekWouldReadLinearly(to target: Double) -> Bool {
+        guard mpvEngine != nil,
+              !isLocalFile,
+              let currentPlaybackUrl,
+              VidLoveService.supportsByteRangeSeeking(for: currentPlaybackUrl) == false else {
+            return false
+        }
+        return abs(target - realPlaybackTime) > 1
+    }
     
     /// Whether the player's embedded audio is muted.
     var isPlayerMuted: Bool {
@@ -496,9 +509,61 @@ class PlayerViewModel: ObservableObject {
     private var introDuration: Double = 0
     private var endTime: Double?
 
+    func updateIntro(start: Double, duration: Double) {
+        guard start.isFinite, duration.isFinite, start >= 0, duration > 0 else { return }
+        introStart = start
+        introDuration = duration
+        lastSetupIntro = start
+        lastSetupIntroDuration = duration
+        updateIntroState()
+    }
+
+    func updateEnd(_ end: Double) {
+        guard end.isFinite, end >= 0 else { return }
+        endTime = end
+        lastSetupEnd = end
+        updateIntroState()
+    }
+
     // MARK: - Setup
-    func setup(url: URL, intro: Double?, introDuration: Double?, end: Double?, preloadedQualities: [HLSQuality]? = nil, sourceNames: [String: String] = [:]) {
-        cleanup()
+    func setup(
+        url: URL,
+        intro: Double?,
+        introDuration: Double?,
+        end: Double?,
+        preloadedQualities: [HLSQuality]? = nil,
+        sourceNames: [String: String] = [:],
+        initialPosition: Double? = nil
+    ) {
+        let requestedHDRHint = Self.shouldUseMPVDirectPlayback(for: url) ? isPlayingHDR : false
+        playbackSetupGeneration += 1
+        let setupGeneration = playbackSetupGeneration
+        cleanup(invalidatePendingSetup: false) { [weak self] in
+            guard let self, self.playbackSetupGeneration == setupGeneration else { return }
+            self.finishSetup(
+                url: url,
+                intro: intro,
+                introDuration: introDuration,
+                end: end,
+                preloadedQualities: preloadedQualities,
+                sourceNames: sourceNames,
+                initialPosition: initialPosition,
+                requestedHDRHint: requestedHDRHint
+            )
+        }
+    }
+
+    private func finishSetup(
+        url: URL,
+        intro: Double?,
+        introDuration: Double?,
+        end: Double?,
+        preloadedQualities: [HLSQuality]?,
+        sourceNames: [String: String],
+        initialPosition: Double?,
+        requestedHDRHint: Bool
+    ) {
+        isPlayingHDR = requestedHDRHint
         
         // Save setup params for source retry
         self.lastSetupUrl = url
@@ -523,7 +588,7 @@ class PlayerViewModel: ObservableObject {
         
         StreamifyLogger.log("PlayerViewModel: setup URL=\(url.absoluteString) isLocalFile=\(isLocalFile) isHLS=\(isHLS) preloadedQualities=\(preloadedQualities?.count ?? 0)")
 
-        // Apply preloaded qualities immediately if available (e.g., VidLink qualities fetched
+        // Apply preloaded qualities immediately if available (e.g., provider qualities fetched
         // during local playback). This makes them visible in the quality picker regardless of
         // whether the current URL is local or remote.
         if let preloaded = preloadedQualities, !preloaded.isEmpty, (isLocalFile || !isHLS) {
@@ -548,7 +613,7 @@ class PlayerViewModel: ObservableObject {
                 self.autoQualitySourceName = quality.sourceName
                 self.isPlayingHDR = qualityIsHDR
             }
-            startMPVPlayer(url: url)
+            startMPVPlayer(url: url, initialPosition: initialPosition)
         } else if isLocalServer && (url.pathExtension == "m3u8" || url.absoluteString.contains(".m3u8")) {
             // For local server HLS, ensure the server is running before starting the player.
             loadingTask = Task {
@@ -560,7 +625,7 @@ class PlayerViewModel: ObservableObject {
                 }
             }
         } else if isHLS && !isLocalFile {
-            // For remote HLS, parse qualities from ALL sources (including VidLink) first,
+            // For remote HLS, parse qualities from all sources first,
             // then start the player with the best quality variant.
             loadingTask = Task {
                 let masterURL = url
@@ -664,7 +729,7 @@ class PlayerViewModel: ObservableObject {
         StreamifyLogger.log("PlayerViewModel: startPlayer URL=\(url.absoluteString)")
     }
 
-    private func startMPVPlayer(url: URL) {
+    private func startMPVPlayer(url: URL, initialPosition: Double?) {
         customEngine?.cleanup()
         customEngine = nil
         mpvAudioTracks = []
@@ -683,7 +748,11 @@ class PlayerViewModel: ObservableObject {
         currentPlaybackUrl = url
         mpvEngine = engine
         isBuffering = true
-        engine.load(url: url, requestHeaders: requestHeaders(for: url))
+        engine.load(
+            url: url,
+            requestHeaders: requestHeaders(for: url),
+            initialPosition: initialPosition
+        )
         StreamifyLogger.log("PlayerViewModel: startMPVPlayer URL=\(url.absoluteString)")
     }
 
@@ -710,15 +779,12 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func requestHeaders(for url: URL) -> [String: String] {
-        if VidLinkService.isVidLinkProxyURL(url.absoluteString) {
-            return ["Referer": VidLinkService.vidLinkReferer]
-        }
-        return [:]
+        VidLoveService.requestHeaders(for: url)
     }
 
     private func setupMPVPlayerCallbacks(_ engine: MPVDirectPlayerEngine) {
-        engine.onStateChanged = { [weak self] state in
-            guard let self else { return }
+        engine.onStateChanged = { [weak self, weak engine] state in
+            guard let self, let engine, self.mpvEngine === engine else { return }
             if state.duration > 0, abs(self.duration - state.duration) > 0.05 {
                 self.duration = state.duration
             }
@@ -747,15 +813,15 @@ class PlayerViewModel: ObservableObject {
             }
         }
 
-        engine.onReadyToPlay = { [weak self] in
-            guard let self else { return }
+        engine.onReadyToPlay = { [weak self, weak engine] in
+            guard let self, let engine, self.mpvEngine === engine else { return }
             self.isReadyToPlay = true
             self.isBuffering = false
             self.logHDRPlaybackStatus()
         }
 
-        engine.onTracksChanged = { [weak self] audioTracks, subtitleTracks in
-            guard let self else { return }
+        engine.onTracksChanged = { [weak self, weak engine] audioTracks, subtitleTracks in
+            guard let self, let engine, self.mpvEngine === engine else { return }
             let embeddedSourceName = self.mpvEmbeddedSourceName
             self.mpvAudioTracks = audioTracks.map { Self.audioTrack(fromMPV: $0, sourceName: embeddedSourceName) }
             self.mpvSubtitleTracks = subtitleTracks.map { Self.subtitleTrack(fromMPV: $0, sourceName: embeddedSourceName) }
@@ -765,23 +831,26 @@ class PlayerViewModel: ObservableObject {
             self.mpvRawSubtitleTracks = subtitleTracks
         }
 
-        engine.onFinished = { [weak self] in
-            self?.isPlaying = false
+        engine.onFinished = { [weak self, weak engine] in
+            guard let self, let engine, self.mpvEngine === engine else { return }
+            self.isPlaying = false
         }
 
-        engine.onSubtitleText = { [weak self] text in
-            self?.mpvLiveSubtitleText = text
+        engine.onSubtitleText = { [weak self, weak engine] text in
+            guard let self, let engine, self.mpvEngine === engine else { return }
+            self.mpvLiveSubtitleText = text
         }
 
-        engine.onError = { [weak self] message in
-            guard let self else { return }
+        engine.onError = { [weak self, weak engine] message in
+            guard let self, let engine, self.mpvEngine === engine else { return }
             self.isReadyToPlay = false
             self.isBuffering = false
             StreamifyLogger.log("PlayerViewModel: MPV error - \(message)")
         }
 
-        engine.onPiPActiveChanged = { [weak self] active in
-            self?.isPiPActive = active
+        engine.onPiPActiveChanged = { [weak self, weak engine] active in
+            guard let self, let engine, self.mpvEngine === engine else { return }
+            self.isPiPActive = active
         }
     }
 
@@ -1030,21 +1099,6 @@ class PlayerViewModel: ObservableObject {
                             self.customEngine = engine
                         }
                         engine.load(url: url, isHLS: self.isHLS, isLocalFile: self.isLocalFile)
-                        self.currentPlaybackUrl = url
-                    }
-                }
-            // For VidLink sources, retry after 10 seconds (VidLink can return HTML/rate limit)
-            } else if VidLinkService.isVidLinkProxyURL(self.lastSetupUrl?.absoluteString ?? "") {
-                StreamifyLogger.log("PlayerViewModel: VidLink error detected, retrying in 10s...")
-                self.sourceRetryTask?.cancel()
-                self.sourceRetryTask = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
-                    guard let self, !Task.isCancelled else { return }
-                    guard let url = self.lastSetupUrl else { return }
-                    StreamifyLogger.log("PlayerViewModel: VidLink retry — reloading player")
-                    await MainActor.run {
-                        // Reload the player engine with the same URL
-                        self.customEngine?.load(url: url, isHLS: self.isHLS, isLocalFile: self.isLocalFile)
                         self.currentPlaybackUrl = url
                     }
                 }
@@ -1332,14 +1386,7 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Parse HLS qualities from m3u8
     func parseHLSQualities(from url: URL) async {
         do {
-            let request: URLRequest
-            if VidLinkService.isVidLinkProxyURL(url.absoluteString), let vidLinkReq = VidLinkService.makeRequest(for: url.absoluteString, timeoutInterval: 10) {
-                request = vidLinkReq
-            } else {
-                var r = URLRequest(url: url)
-                r.timeoutInterval = 10
-                request = r
-            }
+            let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let content = String(data: data, encoding: .utf8) else { return }
             
@@ -1440,33 +1487,12 @@ class PlayerViewModel: ObservableObject {
     
     /// Static helper to pre-parse HLS qualities from a single URL before the player opens.
     static func parseHLSQualitiesStatic(from url: URL, sourceName: String? = nil) async -> [HLSQuality] {
-        // For VidLink, retry if we get HTML instead of a valid m3u8 (rate limit / Cloudflare)
-        let isVL = VidLinkService.isVidLinkProxyURL(url.absoluteString)
-        let maxAttempts = isVL ? 5 : 1
-        for attempt in 1...maxAttempts {
-            let qualities = await parseHLSQualitiesStaticOnce(from: url, sourceName: sourceName)
-            if !qualities.isEmpty {
-                return qualities
-            }
-            if isVL && attempt < maxAttempts {
-                StreamifyLogger.log("parseHLSQualitiesStatic: VidLink returned empty/HTML on attempt \(attempt), waiting 10s before retry...")
-                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
-            }
-        }
-        return []
+        await parseHLSQualitiesStaticOnce(from: url, sourceName: sourceName)
     }
     
     private static func parseHLSQualitiesStaticOnce(from url: URL, sourceName: String? = nil) async -> [HLSQuality] {
-        let isVL = VidLinkService.isVidLinkProxyURL(url.absoluteString)
         do {
-            let request: URLRequest
-            if isVL, let vidLinkReq = VidLinkService.makeRequest(for: url.absoluteString, timeoutInterval: 10) {
-                request = vidLinkReq
-            } else {
-                var r = URLRequest(url: url)
-                r.timeoutInterval = 10
-                request = r
-            }
+            let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let content = String(data: data, encoding: .utf8) else { return [] }
             
@@ -1511,7 +1537,7 @@ class PlayerViewModel: ObservableObject {
                         frameRate: info.frameRate,
                         sourceUrl: url.absoluteString,
                         variantUrl: resolvedVariantUrl,
-                        sourceName: isVL ? "VidLink" : sourceName
+                        sourceName: sourceName
                     ))
                     pendingStreamInf = nil
                 }
@@ -1534,17 +1560,10 @@ class PlayerViewModel: ObservableObject {
         await withTaskGroup(of: [HLSQuality].self) { group in
             for urlString in urls {
                 guard let url = URL(string: urlString) else { continue }
-                let isVidLinkSource = VidLinkService.isVidLinkProxyURL(urlString)
-                let urlSourceName = isVidLinkSource ? "VidLink" : sourceNames[urlString]
+                let urlSourceName = sourceNames[urlString]
                 group.addTask {
                     do {
-                        var request: URLRequest
-                        if isVidLinkSource, let vidLinkReq = VidLinkService.makeRequest(for: urlString, timeoutInterval: 10) {
-                            request = vidLinkReq
-                        } else {
-                            request = URLRequest(url: url)
-                            request.timeoutInterval = 10
-                        }
+                        let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
                         let (data, _) = try await URLSession.shared.data(for: request)
                         guard let content = String(data: data, encoding: .utf8) else { return [] }
                         
@@ -1656,8 +1675,7 @@ class PlayerViewModel: ObservableObject {
         await withTaskGroup(of: [HLSQuality].self) { group in
             for urlString in urls {
                 guard let url = URL(string: urlString) else { continue }
-                let isVL = VidLinkService.isVidLinkProxyURL(urlString)
-                let sn = isVL ? "VidLink" : sourceNames[urlString]
+                let sn = sourceNames[urlString]
                 group.addTask {
                     if !HLSQuality.looksLikeHLS(urlString) {
                         return HLSQuality.directFileQuality(urlString: urlString, sourceName: sn).map { [$0] } ?? []
@@ -1707,13 +1725,7 @@ class PlayerViewModel: ObservableObject {
     /// Also estimates bandwidth from associated STREAM-INF AUDIO group references.
     static func parseHLSAudioRenditions(from url: URL) async -> (renditions: [HLSAudioRendition], embeddedAudioIsSpatial: Bool) {
         do {
-            var request: URLRequest
-            if VidLinkService.isVidLinkProxyURL(url.absoluteString), let vidLinkReq = VidLinkService.makeRequest(for: url.absoluteString, timeoutInterval: 10) {
-                request = vidLinkReq
-            } else {
-                request = URLRequest(url: url)
-                request.timeoutInterval = 10
-            }
+            let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let content = String(data: data, encoding: .utf8) else { return ([], false) }
             return parseHLSAudioRenditions(from: content, baseUrl: url.absoluteString)
@@ -1866,14 +1878,7 @@ class PlayerViewModel: ObservableObject {
     /// Parses #EXT-X-MEDIA:TYPE=SUBTITLES lines from an HLS master playlist.
     static func parseHLSSubtitleRenditions(from url: URL) async -> [SubtitleTrack] {
         do {
-            let request: URLRequest
-            if VidLinkService.isVidLinkProxyURL(url.absoluteString), let vidLinkReq = VidLinkService.makeRequest(for: url.absoluteString, timeoutInterval: 10) {
-                request = vidLinkReq
-            } else {
-                var r = URLRequest(url: url)
-                r.timeoutInterval = 10
-                request = r
-            }
+            let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let content = String(data: data, encoding: .utf8) else { return [] }
             return parseHLSSubtitleRenditions(from: content, baseUrl: url.absoluteString)
@@ -2035,18 +2040,22 @@ class PlayerViewModel: ObservableObject {
         track.trackId.hasPrefix("mpv-subtitle-")
     }
 
-    func selectMPVAudioTrack(_ track: AudioTrack?) {
-        guard let engine = mpvEngine else { return }
+    @discardableResult
+    func selectMPVAudioTrack(_ track: AudioTrack?) -> Bool {
+        guard let engine = mpvEngine else { return false }
         guard let track else {
             selectedMPVAudioTrackId = nil
             engine.selectAudio(id: nil)
-            return
+            return true
         }
+        guard selectedMPVAudioTrackId != track.trackId else { return false }
         selectedMPVAudioTrackId = track.trackId
         engine.selectAudio(id: Self.mpvTrackId(from: track.trackId, prefix: "mpv-audio-"))
+        return true
     }
 
     func disableMPVAudioOutput() {
+        selectedMPVAudioTrackId = nil
         mpvEngine?.disableAudio()
     }
 
@@ -2103,6 +2112,15 @@ class PlayerViewModel: ObservableObject {
         let playerTime = realPlaybackTime
         let oldTime = isSeeking || abs(currentTime - playerTime) > 0.75 ? currentTime : playerTime
         let newTime = min(max(oldTime + seconds, 0), duration)
+        guard !remoteMPVSeekWouldReadLinearly(to: newTime) else {
+            currentTime = playerTime
+            StreamifyLogger.log(
+                "PlayerViewModel: skipped remote MP4 seek from \(playerTime)s to \(newTime)s "
+                    + "because the source ignored byte-range requests"
+            )
+            completion?(false)
+            return 0
+        }
         let actualSkip = newTime - oldTime
         currentTime = newTime
         
@@ -2133,6 +2151,16 @@ class PlayerViewModel: ObservableObject {
     func seek(to seconds: Double) {
         guard customEngine != nil || mpvEngine != nil else { return }
         let clamped = duration > 0 ? min(max(seconds, 0), duration) : max(seconds, 0)
+        guard !remoteMPVSeekWouldReadLinearly(to: clamped) else {
+            let playerTime = realPlaybackTime
+            currentTime = playerTime
+            updateIntroState()
+            StreamifyLogger.log(
+                "PlayerViewModel: skipped remote MP4 seek from \(playerTime)s to \(clamped)s "
+                    + "because the source ignored byte-range requests"
+            )
+            return
+        }
         currentTime = clamped
         let generation = beginSeek()
         seekEngine(to: clamped) { [weak self] finished in
@@ -2151,6 +2179,17 @@ class PlayerViewModel: ObservableObject {
             return
         }
         let clamped = duration > 0 ? min(max(seconds, 0), duration) : max(seconds, 0)
+        guard !remoteMPVSeekWouldReadLinearly(to: clamped) else {
+            let playerTime = realPlaybackTime
+            currentTime = playerTime
+            updateIntroState()
+            StreamifyLogger.log(
+                "PlayerViewModel: skipped remote MP4 seek from \(playerTime)s to \(clamped)s "
+                    + "because the source ignored byte-range requests"
+            )
+            completion()
+            return
+        }
         currentTime = clamped
         let generation = beginSeek()
         seekEngine(to: clamped) { [weak self] _ in
@@ -2169,28 +2208,6 @@ class PlayerViewModel: ObservableObject {
         }
     }
     
-    /// Resets the player by pausing, re-seeking to the current position, and resuming.
-    /// This flushes stale decoder state.
-    func resetPlayerItem(completion: @escaping @Sendable () -> Void) {
-        guard customEngine != nil || mpvEngine != nil else {
-            completion()
-            return
-        }
-        let savedTime = realPlaybackTime
-        let wasPlaying = isPlaying
-        customEngine?.pause()
-        mpvEngine?.pause()
-        seekEngine(to: savedTime) { [weak self] _ in
-            Task { @MainActor in
-                if wasPlaying {
-                    self?.play()
-                }
-                StreamifyLogger.log("PlayerViewModel: resetPlayerItem complete — time=\(savedTime)s")
-                completion()
-            }
-        }
-    }
-
     func skipIntro(resumeAfterSeek: Bool = true, completion: (() -> Void)? = nil) {
         showSkipIntro = false
         let wasPlaying = isPlaying
@@ -2440,13 +2457,23 @@ class PlayerViewModel: ObservableObject {
     }
 
     // MARK: - Cleanup
-    func cleanup() {
+    func cleanup(
+        invalidatePendingSetup: Bool = true,
+        completion: (() -> Void)? = nil
+    ) {
         StreamifyLogger.log("PlayerViewModel: cleanup() called")
-        
+        if invalidatePendingSetup {
+            playbackSetupGeneration += 1
+        }
+        if let completion {
+            mpvTeardownWaiters.append(completion)
+        }
+
+        let mpvEngineToCleanUp = mpvEngine
+
         // Clean up custom player engine
         customEngine?.cleanup()
         customEngine = nil
-        mpvEngine?.cleanup()
         mpvEngine = nil
         currentPlaybackUrl = nil
         pendingSeekAfterReady = nil
@@ -2472,13 +2499,20 @@ class PlayerViewModel: ObservableObject {
         isReadyToPlay = false
         isPlayingHDR = false
         isBuffering = false
+        showSkipIntro = false
+        showNextEpisode = false
+        introStart = 0
+        introDuration = 0
+        endTime = nil
         availableQualities = []
         mpvAudioTracks = []
         mpvSubtitleTracks = []
         mpvRawAudioTracks = []
         mpvRawSubtitleTracks = []
+        mpvLiveSubtitleText = ""
         selectedMPVAudioTrackId = nil
         selectedMPVSubtitleTrackId = nil
+        isPiPActive = false
         isHDRVariantMode = false
         currentVariantQuality = nil
         lastObservedBitrate = 0
@@ -2491,6 +2525,26 @@ class PlayerViewModel: ObservableObject {
         activeAutoSourceUrl = nil
         hasAccessDeniedPlayback = false
         
+        if let mpvEngineToCleanUp {
+            isMPVTeardownPending = true
+            mpvEngineToCleanUp.cleanup { [weak self] in
+                self?.completeMPVTeardown()
+            }
+            StreamifyLogger.log("PlayerViewModel: cleanup() state cleared; native MPV teardown pending")
+        } else if !isMPVTeardownPending {
+            completeMPVTeardown()
+        } else {
+            StreamifyLogger.log("PlayerViewModel: cleanup() waiting for an existing native MPV teardown")
+        }
+    }
+
+    private func completeMPVTeardown() {
+        isMPVTeardownPending = false
+        let waiters = mpvTeardownWaiters
+        mpvTeardownWaiters.removeAll()
         StreamifyLogger.log("PlayerViewModel: cleanup() completed")
+        for waiter in waiters {
+            waiter()
+        }
     }
 }

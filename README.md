@@ -6,7 +6,9 @@ Or more correctly a vibecoded slop app that looks kinda cool
 
 The app has TMDB support for populating the library.
 
-For streaming and downloads it has support for Torrentio, 111movies and VidLink. 
+For streaming and downloads it has support for Torrentio and VidLove.
+
+TV episode intro timing can be loaded from [IntroDB](https://introdb.app/).
 
 ## Screenshots
 

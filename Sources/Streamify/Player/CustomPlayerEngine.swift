@@ -372,15 +372,7 @@ final class CustomPlayerEngine: ObservableObject {
         // Ensure video view is ready (may have been cleared by cleanup)
         if playerLayerView == nil { setupVideoView() }
 
-        let asset: AVURLAsset
-        if VidLinkService.isVidLinkProxyURL(url.absoluteString) {
-            // VidLink proxy URLs require Referer header for all requests (playlists + segments)
-            asset = AVURLAsset(url: url, options: [
-                "AVURLAssetHTTPHeaderFieldsKey": ["Referer": VidLinkService.vidLinkReferer]
-            ])
-        } else {
-            asset = AVURLAsset(url: url)
-        }
+        let asset = Self.asset(for: url)
         let item = AVPlayerItem(asset: asset)
 
         applyForwardBufferPolicy(to: item, isHLS: isHLS || Self.looksLikeHLS(url))
@@ -456,6 +448,10 @@ final class CustomPlayerEngine: ObservableObject {
         item.preferredForwardBufferDuration = normalForwardBufferDuration
     }
 
+    private static func asset(for url: URL) -> AVURLAsset {
+        AVURLAsset(url: url, options: VidLoveService.assetOptions(for: url))
+    }
+
     /// Shrink the forward decode buffer to 1 second while paused so the media
     /// server can release decoder memory.  Called on pause and app-background.
     func trimDecoderBuffers() {
@@ -486,14 +482,7 @@ final class CustomPlayerEngine: ObservableObject {
         clearObservers()
         pendingPlaybackStartCallback = nil
 
-        let asset: AVURLAsset
-        if VidLinkService.isVidLinkProxyURL(url.absoluteString) {
-            asset = AVURLAsset(url: url, options: [
-                "AVURLAssetHTTPHeaderFieldsKey": ["Referer": VidLinkService.vidLinkReferer]
-            ])
-        } else {
-            asset = AVURLAsset(url: url)
-        }
+        let asset = Self.asset(for: url)
         let item = AVPlayerItem(asset: asset)
         let shouldBoundHLS = isHLS ?? Self.looksLikeHLS(url)
         applyForwardBufferPolicy(to: item, isHLS: shouldBoundHLS)

@@ -173,7 +173,7 @@ extension ContentDetailView {
                                 .font(.callout)
                                 .foregroundStyle(.gray)
                         }
-                    } else if (episode.hlsUrl != nil || content.metadata.hlsUrl != nil || sourceContent?.hlsUrl != nil || (resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled || torrentioEnabled))) {
+                    } else if (episode.hlsUrl != nil || content.metadata.hlsUrl != nil || sourceContent?.hlsUrl != nil || (resolveTmdbId() != nil && (vidLoveEnabled || torrentioEnabled))) {
                         Button {
                             downloadEpisode(episode)
                         } label: {
@@ -412,7 +412,7 @@ extension ContentDetailView {
                         .font(.callout)
                         .foregroundStyle(.gray)
                 }
-            } else if (episode.hlsUrl != nil || content.metadata.hlsUrl != nil || sourceContent?.hlsUrl != nil || (resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled || torrentioEnabled))) {
+            } else if (episode.hlsUrl != nil || content.metadata.hlsUrl != nil || sourceContent?.hlsUrl != nil || (resolveTmdbId() != nil && (vidLoveEnabled || torrentioEnabled))) {
                 Button {
                     downloadEpisode(episode)
                 } label: {
@@ -669,7 +669,7 @@ extension ContentDetailView {
             return true
         }
         // Streaming providers: playable if we have a TMDB ID and any provider is enabled
-        if resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled || torrentioEnabled) {
+        if resolveTmdbId() != nil && (vidLoveEnabled || torrentioEnabled) {
             return true
         }
         return false
@@ -688,7 +688,7 @@ extension ContentDetailView {
         if sourceContent?.hlsUrl != nil || sourceContent?.fileUrl != nil {
             return true
         }
-        return resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled)
+        return resolveTmdbId() != nil && vidLoveEnabled
     }
 
     func hasSeriesPlayableUrl() -> Bool {
@@ -708,7 +708,7 @@ extension ContentDetailView {
             return true
         }
         // Streaming providers: playable if we have a TMDB ID and an automatic playback provider is enabled
-        if resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled) {
+        if resolveTmdbId() != nil && vidLoveEnabled {
             return true
         }
         return false
@@ -722,7 +722,7 @@ extension ContentDetailView {
             content.metadata.file != nil ||
             sourceContent?.hlsUrl != nil ||
             sourceContent?.fileUrl != nil ||
-            (resolveTmdbId() != nil && (vidLinkEnabled || movies111Enabled))
+            (resolveTmdbId() != nil && vidLoveEnabled)
     }
 
     /// Resolve TMDB ID from metadata or source content

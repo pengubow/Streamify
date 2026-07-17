@@ -5,7 +5,7 @@ import SwiftUI
 /// A small colored pill badge used throughout the app.
 ///
 /// Usage:
-///   PillBadge("VidLink", color: .purple)
+///   PillBadge("VidLove", color: .purple)
 ///   PillBadge("HDR", color: .blue)
 ///   PillBadge("Spatial", color: .orange)
 struct PillBadge: View {

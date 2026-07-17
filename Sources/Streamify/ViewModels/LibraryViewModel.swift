@@ -179,6 +179,7 @@ class LibraryViewModel: ObservableObject {
     
     private var downloadManager = DownloadManager.shared
     private var cancellables = Set<AnyCancellable>()
+    private var tmdbEnrichmentTask: Task<Void, Never>?
     
     /// Caches for TMDB poster/backdrop URLs keyed by tmdbId
     var tmdbPosterCache: [Int: String] = [:]
@@ -584,7 +585,12 @@ class LibraryViewModel: ObservableObject {
     /// Enrich merged content and library with TMDB data (posters, episodes).
     /// Fetches TMDB metadata for content that has a tmdbId and fills in missing posters and episodes.
     func enrichWithTMDB() {
-        guard TMDBService.isConfigured else { return }
+        tmdbEnrichmentTask?.cancel()
+        let configuredKey = TMDBService.apiKey
+        guard !configuredKey.isEmpty else {
+            tmdbEnrichmentTask = nil
+            return
+        }
         
         // Collect all content with tmdbIds (from sources and library)
         var tmdbItems: [(id: String, tmdbId: Int, type: ContentType)] = []
@@ -603,15 +609,21 @@ class LibraryViewModel: ObservableObject {
             }
         }
         
-        guard !tmdbItems.isEmpty else { return }
-        
-        Task {
+        guard !tmdbItems.isEmpty else {
+            tmdbEnrichmentTask = nil
+            return
+        }
+
+        tmdbEnrichmentTask = Task {
             // Fetch TMDB metadata for enrichment (poster/backdrop fallbacks + episodes)
             for item in tmdbItems {
+                guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                 if item.type == .series {
                     // Fetch TV show detail for poster + seasons/episodes
                     if let detail = await TMDBService.fetchTVShowDetail(tmdbId: item.tmdbId) {
+                        guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                         await MainActor.run {
+                            guard TMDBService.apiKey == configuredKey else { return }
                             // Cache poster/backdrop
                             if let posterPath = detail.posterPath {
                                 tmdbPosterCache[item.tmdbId] = "\(TMDBService.imageBaseURL)/w342\(posterPath)"
@@ -625,7 +637,9 @@ class LibraryViewModel: ObservableObject {
                         if let seasons = detail.seasons?.filter({ $0.seasonNumber > 0 }) {
                             var enrichedSeasons: [SeasonInfo] = []
                             for season in seasons {
+                                guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                                 if let seasonDetail = await TMDBService.fetchSeasonDetail(tmdbId: item.tmdbId, seasonNumber: season.seasonNumber) {
+                                    guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                                     let episodes: [EpisodeInfo] = (seasonDetail.episodes ?? []).map { ep in
                                         EpisodeInfo(
                                             season: season.seasonNumber,
@@ -647,9 +661,11 @@ class LibraryViewModel: ObservableObject {
                                     ))
                                 }
                             }
-                            
+
                             if !enrichedSeasons.isEmpty {
+                                guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                                 await MainActor.run {
+                                    guard TMDBService.apiKey == configuredKey else { return }
                                     enrichMergedContentSeasons(contentId: item.id, tmdbSeasons: enrichedSeasons)
                                     enrichLibrarySeasons(contentId: item.id, tmdbSeasons: enrichedSeasons)
                                 }
@@ -658,7 +674,8 @@ class LibraryViewModel: ObservableObject {
                     }
                 } else {
                     // Movie: just fetch poster/backdrop
-                    if let data = await fetchTMDBData(urlString: "https://api.themoviedb.org/3/movie/\(item.tmdbId)?api_key=\(TMDBService.apiKey)&language=en-US") {
+                    if let data = await fetchTMDBData(urlString: "https://api.themoviedb.org/3/movie/\(item.tmdbId)?api_key=\(configuredKey)&language=en-US") {
+                        guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
                         struct MovieInfo: Codable {
                             let posterPath: String?
                             let backdropPath: String?
@@ -669,6 +686,7 @@ class LibraryViewModel: ObservableObject {
                         }
                         if let info = try? JSONDecoder().decode(MovieInfo.self, from: data) {
                             await MainActor.run {
+                                guard TMDBService.apiKey == configuredKey else { return }
                                 if let posterPath = info.posterPath {
                                     tmdbPosterCache[item.tmdbId] = "\(TMDBService.imageBaseURL)/w342\(posterPath)"
                                 }
@@ -680,11 +698,14 @@ class LibraryViewModel: ObservableObject {
                     }
                 }
             }
-            
+
             // After enrichment, update poster fallbacks for merged content that lacks images
+            guard !Task.isCancelled, TMDBService.apiKey == configuredKey else { return }
             await MainActor.run {
+                guard TMDBService.apiKey == configuredKey else { return }
                 enrichMergedContentPosters()
                 objectWillChange.send()
+                tmdbEnrichmentTask = nil
             }
         }
     }

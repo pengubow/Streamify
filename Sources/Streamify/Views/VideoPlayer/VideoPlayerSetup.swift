@@ -33,21 +33,34 @@ extension VideoPlayerView {
         let introDur = currentEpisodeInfo?.introDuration ?? content.metadata.introDuration
         let end = currentEpisodeInfo?.end ?? content.metadata.end
 
-        // Set pre-parsed qualities before setup so it can skip re-parsing
-        applyDownloadedQualityHDRForCurrentPlayback()
-        viewModel.setup(url: currentVideoURL, intro: intro, introDuration: introDur, end: end, preloadedQualities: preloadedQualities, sourceNames: onlineUrlSourceNames)
-        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
-        applyDownloadedQualityHDRForCurrentPlayback()
-        
-        // Check for saved progress BEFORE the player is set up
         let seasonNumber = currentEpisodeInfo?.season
-        let savedProgress = WatchingProgressManager.getProgress(for: content.id, seasonIndex: seasonNumber, episodeIndex: episodeNumber)
+        let savedProgress = WatchingProgressManager.getProgress(
+            for: content.id,
+            seasonIndex: seasonNumber,
+            episodeIndex: episodeNumber
+        )
         let savedTimestamp = savedProgress?.timestamp ?? 0
         let savedDuration = savedProgress?.duration ?? 0
+        let startupPosition = clampedResumeTime(savedTimestamp, duration: savedDuration)
+
+        // Set pre-parsed qualities before setup so it can skip re-parsing
+        applyDownloadedQualityHDRForCurrentPlayback()
+        viewModel.setup(
+            url: currentVideoURL,
+            intro: intro,
+            introDuration: introDur,
+            end: end,
+            preloadedQualities: preloadedQualities,
+            sourceNames: onlineUrlSourceNames,
+            initialPosition: startupPosition
+        )
+        loadIntroDBTimingIfNeeded()
+        viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
+        applyDownloadedQualityHDRForCurrentPlayback()
 
         // Show the saved time in the UI immediately (don't show 0:00 until player seeks)
-        if savedTimestamp > 0 {
-            viewModel.currentTime = savedTimestamp
+        if startupPosition > 0 {
+            viewModel.currentTime = startupPosition
         }
         if savedDuration > 0 {
             viewModel.duration = savedDuration
@@ -69,9 +82,21 @@ extension VideoPlayerView {
                 // Skip if we've already processed this ready state
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
-                
+
                 let duration = max(readyDuration, viewModel.duration)
-                
+
+                if viewModel.isUsingMPVPlayback {
+                    StreamifyLogger.log(
+                        "VideoPlayerView: MPV ready with startup position \(startupPosition)s; "
+                            + "restoring audio and starting playback"
+                    )
+                    Task { @MainActor in
+                        self.markSeekedPlaybackNeedsVideoGate()
+                        self.restorePlaybackPrerequisitesAfterSeek(shouldStartPlayback: true)
+                    }
+                    return
+                }
+
                 if savedTimestamp > 0 {
                     let clampedTime = clampedResumeTime(savedTimestamp, duration: duration)
                     StreamifyLogger.log("VideoPlayerView: Player ready with duration=\(duration)s, seeking to \(clampedTime)s (saved=\(savedTimestamp)s)")
@@ -189,9 +214,145 @@ extension VideoPlayerView {
         // Keep the native embedded output muted; embedded/default audio is
         // rendered by a compensated audio player after the initial seek completes.
         viewModel.isPlayerMuted = !viewModel.isUsingMPVPlayback
-        
+
     }
-    
+
+    func loadIntroDBTimingIfNeeded() {
+        introDBTask?.cancel()
+        introDBTask = nil
+
+        guard let episode = currentEpisodeInfo else {
+            return
+        }
+        let needsIntro = (episode.intro == nil || episode.introDuration == nil) &&
+            (content.metadata.intro == nil || content.metadata.introDuration == nil)
+        let needsOutro = episode.end == nil && content.metadata.end == nil
+        guard needsIntro || needsOutro else { return }
+
+        let tmdbId = PlaybackResolver.resolveTmdbId(for: content)
+        let episodeId = episode.id
+        let seededEpisode = episode.copying(
+            intro: .some(episode.intro ?? content.metadata.intro),
+            introDuration: .some(episode.introDuration ?? content.metadata.introDuration),
+            end: .some(episode.end ?? content.metadata.end)
+        )
+
+        introDBTask = Task {
+            let enriched = await IntroDBService.enriching(seededEpisode, tmdbId: tmdbId)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let currentEpisode = currentEpisodeInfo,
+                      currentEpisode.id == episodeId else { return }
+                let updatedEpisode = currentEpisode.copying(
+                    intro: .some(currentEpisode.intro ?? enriched.intro),
+                    introDuration: .some(currentEpisode.introDuration ?? enriched.introDuration),
+                    end: .some(currentEpisode.end ?? enriched.end)
+                )
+                currentEpisodeInfo = updatedEpisode
+                persistIntroDBTiming(updatedEpisode)
+                if let intro = updatedEpisode.intro,
+                   let duration = updatedEpisode.introDuration {
+                    viewModel.updateIntro(start: intro, duration: duration)
+                }
+                if let end = updatedEpisode.end {
+                    viewModel.updateEnd(end)
+                }
+                introDBTask = nil
+            }
+        }
+    }
+
+    func persistIntroDBTiming(_ episode: EpisodeInfo) {
+        guard episode.intro != nil || episode.introDuration != nil || episode.end != nil,
+              !content.folderPath.isEmpty,
+              var metadata = ContentImportService.loadMetadata(from: content.folderPath) else {
+            return
+        }
+
+        var changed = false
+        var foundEpisode = false
+
+        func mergingTiming(into storedEpisode: EpisodeInfo) -> EpisodeInfo {
+            let updatedEpisode = storedEpisode.copying(
+                intro: .some(storedEpisode.intro ?? episode.intro),
+                introDuration: .some(storedEpisode.introDuration ?? episode.introDuration),
+                end: .some(storedEpisode.end ?? episode.end)
+            )
+            if updatedEpisode != storedEpisode {
+                changed = true
+            }
+            return updatedEpisode
+        }
+
+        var updatedEpisodes = metadata.episodes
+        if var episodes = updatedEpisodes {
+            if let index = episodes.firstIndex(where: {
+                $0.season == episode.season && $0.episode == episode.episode
+            }) {
+                foundEpisode = true
+                episodes[index] = mergingTiming(into: episodes[index])
+                updatedEpisodes = episodes
+            }
+        }
+
+        var updatedSeasons = metadata.seasons
+        if var seasons = updatedSeasons {
+            for seasonIndex in seasons.indices where seasons[seasonIndex].season == episode.season {
+                guard var episodes = seasons[seasonIndex].episodes,
+                      let episodeIndex = episodes.firstIndex(where: { $0.episode == episode.episode }) else {
+                    continue
+                }
+                foundEpisode = true
+                episodes[episodeIndex] = mergingTiming(into: episodes[episodeIndex])
+                seasons[seasonIndex] = SeasonInfo(
+                    season: seasons[seasonIndex].season,
+                    title: seasons[seasonIndex].title,
+                    thumbnailUrl: seasons[seasonIndex].thumbnailUrl,
+                    episodes: episodes
+                )
+            }
+            updatedSeasons = seasons
+        }
+
+        if !foundEpisode {
+            if var seasons = updatedSeasons, !seasons.isEmpty {
+                if let seasonIndex = seasons.firstIndex(where: { $0.season == episode.season }) {
+                    var episodes = seasons[seasonIndex].episodes ?? []
+                    episodes.append(episode)
+                    seasons[seasonIndex] = SeasonInfo(
+                        season: seasons[seasonIndex].season,
+                        title: seasons[seasonIndex].title,
+                        thumbnailUrl: seasons[seasonIndex].thumbnailUrl,
+                        episodes: episodes
+                    )
+                } else {
+                    seasons.append(SeasonInfo(season: episode.season, episodes: [episode]))
+                }
+                updatedSeasons = seasons
+            } else {
+                var episodes = updatedEpisodes ?? []
+                episodes.append(episode)
+                updatedEpisodes = episodes
+            }
+            changed = true
+        }
+
+        guard changed else { return }
+        metadata = metadata.copying(
+            seasons: .some(updatedSeasons),
+            episodes: .some(updatedEpisodes)
+        )
+        ContentImportService.saveMetadata(metadata, to: content.folderPath)
+        DownloadManager.shared.libraryRefreshNeeded = true
+        let introDescription = episode.intro.map { String($0) } ?? "nil"
+        let durationDescription = episode.introDuration.map { String($0) } ?? "nil"
+        let endDescription = episode.end.map { String($0) } ?? "nil"
+        StreamifyLogger.log(
+            "IntroDB: Persisted S\(episode.season)E\(episode.episode) timing "
+                + "(intro=\(introDescription), duration=\(durationDescription), end=\(endDescription))"
+        )
+    }
+
     // Re-apply audio track after HLS audio renditions are discovered
     func reapplyAudioAfterTrackDiscovery() {
         // If already playing external audio, no need to switch
@@ -391,9 +552,8 @@ extension VideoPlayerView {
     }
 
     func restorePlaybackPrerequisitesAfterSeek(shouldStartPlayback: Bool) {
-        restoreSubtitleTrackAfterPlayerReady {
-            self.restoreAudioTrackAfterPlayerReady(shouldStartPlayback: shouldStartPlayback)
-        }
+        restoreSubtitleTrackAfterPlayerReady()
+        restoreAudioTrackAfterPlayerReady(shouldStartPlayback: shouldStartPlayback)
     }
 
     // Restore previously selected subtitle track after player is ready.

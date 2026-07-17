@@ -379,8 +379,12 @@ extension VideoPlayerView {
             shouldResumeAfterPicker
         )
         let shouldResumePlayback = wantsResumePlayback
+        let isAlreadySelectedMPVTrack = viewModel.isUsingMPVPlayback &&
+            track.map { viewModel.isMPVAudioTrack($0) } == true &&
+            viewModel.selectedMPVAudioTrackId == track?.trackId &&
+            !viewModel.isPlayerMuted
 
-        if wantsResumePlayback {
+        if wantsResumePlayback && !isAlreadySelectedMPVTrack {
             viewModel.pause()
             if isPickerOrSwitchAlertPresented {
                 pausedPlaybackForPicker = true
@@ -399,8 +403,11 @@ extension VideoPlayerView {
         if viewModel.isUsingMPVPlayback {
             if let track, viewModel.isMPVAudioTrack(track) {
                 viewModel.isPlayerMuted = false
-                viewModel.selectMPVAudioTrack(track)
-                StreamifyLogger.log("Audio: Switched MPV audio to \(track.displayName)")
+                if viewModel.selectMPVAudioTrack(track) {
+                    StreamifyLogger.log("Audio: Switched MPV audio to \(track.displayName)")
+                } else {
+                    StreamifyLogger.log("Audio: MPV audio \(track.displayName) already active")
+                }
             } else if let track,
                       let url = resolveAudioURL(for: track) {
                 viewModel.isPlayerMuted = true
@@ -413,8 +420,17 @@ extension VideoPlayerView {
                 viewModel.selectMPVAudioTrack(nil)
                 StreamifyLogger.log("Audio: Switched MPV audio to default")
             }
-            if shouldResumePlayback && !isPickerOrSwitchAlertPresented {
-                viewModel.play()
+            if shouldResumePlayback {
+                if isPickerOrSwitchAlertPresented {
+                    StreamifyLogger.log(
+                        "Audio: MPV resume deferred by picker state " +
+                            "(quality=\(showQualitySheet), subtitles=\(showSubtitleSheet), " +
+                            "audio=\(showAudioSheet), subtitleVariant=\(showSubtitleVariantSheet), " +
+                            "audioVariant=\(showAudioVariantSheet), onlineSwitch=\(showSwitchToOnlineAlert))"
+                    )
+                } else {
+                    viewModel.play()
+                }
             }
             return
         }

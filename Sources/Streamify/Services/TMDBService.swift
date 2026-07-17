@@ -9,6 +9,7 @@ enum TMDBService {
     
     private static let baseURL = "https://api.themoviedb.org/3"
     static let imageBaseURL = "https://image.tmdb.org/t/p"
+    static let apiKeyDidChangeNotification = Notification.Name("TMDBService.apiKeyDidChange")
     
     /// Get the stored TMDB API key from UserDefaults
     static var apiKey: String {
@@ -18,6 +19,10 @@ enum TMDBService {
     /// Check if TMDB is configured (API key is set)
     static var isConfigured: Bool {
         !apiKey.isEmpty
+    }
+
+    static func notifyAPIKeyChanged() {
+        NotificationCenter.default.post(name: apiKeyDidChangeNotification, object: nil)
     }
     
     // MARK: - Response Models

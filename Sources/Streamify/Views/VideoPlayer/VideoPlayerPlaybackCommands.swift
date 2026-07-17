@@ -20,6 +20,31 @@ extension VideoPlayerView {
         showSubtitleVariantSheet || showAudioVariantSheet || showSwitchToOnlineAlert
     }
 
+    func resetPlayerPickerPresentationState(context: String) {
+        let presentedPickers = [
+            showQualitySheet ? "quality" : nil,
+            showSubtitleSheet ? "subtitles" : nil,
+            showAudioSheet ? "audio" : nil,
+            showSubtitleVariantSheet ? "subtitle variant" : nil,
+            showAudioVariantSheet ? "audio variant" : nil,
+            showSwitchToOnlineAlert ? "online switch" : nil
+        ].compactMap { $0 }
+
+        showQualitySheet = false
+        showSubtitleSheet = false
+        showAudioSheet = false
+        showSubtitleVariantSheet = false
+        showAudioVariantSheet = false
+        showSwitchToOnlineAlert = false
+        clearPickerPauseState()
+
+        if !presentedPickers.isEmpty {
+            StreamifyLogger.log(
+                "Player: Cleared stale picker state during \(context): \(presentedPickers.joined(separator: ", "))"
+            )
+        }
+    }
+
     func handlePickerPresentationChange() {
         if isPickerOrSwitchAlertPresented {
             pauseForPickerIfNeeded()
@@ -70,6 +95,43 @@ extension VideoPlayerView {
         isVideoPlaybackRequestedOrActive ||
             (externalAudioPlayer?.rate ?? 0) > 0 ||
             (embeddedAudioPlayer?.rate ?? 0) > 0
+    }
+
+    func pauseForSceneInterruptionIfNeeded() {
+        guard !viewModel.isPiPActive else { return }
+        guard !pausedPlaybackForSceneInterruption else { return }
+
+        pausedPlaybackForSceneInterruption = true
+        shouldResumeAfterSceneInterruption = isPlaybackRequestedOrActive
+        pausePlayback()
+        StreamifyLogger.log(
+            "Player: Scene entered background - paused playback " +
+                "(resume=\(shouldResumeAfterSceneInterruption), mpv=\(viewModel.isUsingMPVPlayback))"
+        )
+    }
+
+    func recoverPlaybackAfterSceneInterruptionIfNeeded() {
+        guard pausedPlaybackForSceneInterruption else { return }
+
+        let shouldResume = shouldResumeAfterSceneInterruption
+        pausedPlaybackForSceneInterruption = false
+        shouldResumeAfterSceneInterruption = false
+        completeSceneInterruptionRecovery(shouldResume: shouldResume)
+    }
+
+    func completeSceneInterruptionRecovery(shouldResume: Bool) {
+        StreamifyLogger.log(
+            "Player: Scene became active - recovery complete " +
+                "(resume=\(shouldResume), mpv=\(viewModel.isUsingMPVPlayback))"
+        )
+        viewModel.customEngine?.restoreDecoderBuffers()
+        restoreSeparateAudioBuffers()
+        guard shouldResume,
+              !isTransitioningToNext,
+              switchToOnlineTask == nil,
+              nextEpisodeTask == nil else { return }
+
+        playWithSyncedAudio()
     }
 
     var isSkipAudioSyncPending: Bool {

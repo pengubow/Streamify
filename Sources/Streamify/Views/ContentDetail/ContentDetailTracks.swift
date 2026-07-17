@@ -167,8 +167,7 @@ extension ContentDetailView {
                 directUrls: directUrls,
                 sourceNamesMap: sourceNames,
                 tmdbId: tmdbId,
-                vidLinkEnabled: vidLinkEnabled,
-                movies111Enabled: movies111Enabled,
+                vidLoveEnabled: vidLoveEnabled,
                 torrentioEnabled: torrentioEnabled,
                 includeTorrentioDirectOptions: true,
                 onCheckingURL: { [weak skipper] candidate in
@@ -203,8 +202,7 @@ extension ContentDetailView {
                 proceedWithMovieDownload(
                     urlString: result.url.absoluteString,
                     streamingSubtitles: result.mergedSubtitles ?? [],
-                    vidLinkHlsUrl: result.vidLinkUrl?.absoluteString,
-                    movies111HlsUrl: result.movies111Url?.absoluteString,
+                    vidLoveUrl: result.vidLoveUrl?.absoluteString,
                     torrentioHlsUrl: result.torrentioUrl?.absoluteString,
                     streamingQualities: result.preloadedQualities ?? []
                 )
@@ -213,12 +211,11 @@ extension ContentDetailView {
         playResolutionTask = task
     }
 
-    func proceedWithMovieDownload(urlString: String, streamingSubtitles: [SubtitleTrack] = [], vidLinkHlsUrl: String? = nil, movies111HlsUrl: String? = nil, torrentioHlsUrl: String? = nil, streamingQualities: [HLSQuality] = []) {
-        StreamifyLogger.log("downloadMovie: Using URL: \(urlString), VidLink URL: \(vidLinkHlsUrl ?? "none"), 111Movies URL: \(movies111HlsUrl ?? "none"), Torrentio URL: \(torrentioHlsUrl ?? "none")")
+    func proceedWithMovieDownload(urlString: String, streamingSubtitles: [SubtitleTrack] = [], vidLoveUrl: String? = nil, torrentioHlsUrl: String? = nil, streamingQualities: [HLSQuality] = []) {
+        StreamifyLogger.log("downloadMovie: Using URL: \(urlString), VidLove URL: \(vidLoveUrl ?? "none"), Torrentio URL: \(torrentioHlsUrl ?? "none")")
         selectedEpisodeForDownload = nil
         pendingDownloadUrl = urlString
-        pendingVidLinkHlsUrl = vidLinkHlsUrl
-        pendingMovies111HlsUrl = movies111HlsUrl
+        pendingVidLoveUrl = vidLoveUrl
         pendingTorrentioHlsUrl = torrentioHlsUrl?.contains(".m3u8") == true ? torrentioHlsUrl : nil
         pendingStreamingQualities = streamingQualities
         selectedDownloadSubtitles.removeAll()
@@ -232,7 +229,7 @@ extension ContentDetailView {
         var subtitles = resolveAllSubtitleTracks()
             .filter { $0.source.isEmpty || $0.source.hasPrefix("http") }
 
-        // Merge VidLink subtitles (avoid duplicates by language)
+        // Merge streaming-provider subtitles (avoid duplicates by language)
         let existingSubLangs = Set(subtitles.map { $0.languageId })
         for sub in streamingSubtitles {
             if !existingSubLangs.contains(sub.languageId) {
@@ -260,8 +257,9 @@ extension ContentDetailView {
         // If HLS, also parse audio renditions from master playlist (async)
         let isHLS = urlString.contains(".m3u8")
         if isHLS, let hlsUrl = URL(string: urlString) {
-            let isVidLinkUrl = VidLinkService.isVidLinkProxyURL(urlString)
-            let hlsSourceName = isVidLinkUrl ? "VidLink" : viewModel.hlsUrlSourceNames(for: content.id)[urlString]
+            let hlsSourceName = streamingQualities.first(where: {
+                $0.sourceUrl == urlString || $0.variantUrl == urlString
+            })?.sourceName ?? viewModel.hlsUrlSourceNames(for: content.id)[urlString]
             loadingMessage = "Preparing download..."
             Task {
                 let renditions = await PlayerViewModel.parseHLSAudioRenditions(from: hlsUrl).renditions
@@ -340,8 +338,7 @@ extension ContentDetailView {
                 tmdbId: tmdbId,
                 season: episode.season,
                 episode: episode.episode,
-                vidLinkEnabled: vidLinkEnabled,
-                movies111Enabled: movies111Enabled,
+                vidLoveEnabled: vidLoveEnabled,
                 torrentioEnabled: torrentioEnabled,
                 includeTorrentioDirectOptions: true,
                 onCheckingURL: { [weak skipper] candidate in
@@ -361,6 +358,19 @@ extension ContentDetailView {
 
             guard !Task.isCancelled else { return }
 
+            let resolvedEpisode: EpisodeInfo
+            if result != nil {
+                let seededEpisode = episode.copying(
+                    intro: .some(episode.intro ?? current.metadata.intro),
+                    introDuration: .some(episode.introDuration ?? current.metadata.introDuration),
+                    end: .some(episode.end ?? current.metadata.end)
+                )
+                resolvedEpisode = await IntroDBService.enriching(seededEpisode, tmdbId: tmdbId)
+            } else {
+                resolvedEpisode = episode
+            }
+            guard !Task.isCancelled else { return }
+
             await MainActor.run {
                 urlCheckSkipper = nil
                 playResolutionTask = nil
@@ -374,11 +384,10 @@ extension ContentDetailView {
                 }
 
                 proceedWithEpisodeDownload(
-                    episode: episode,
+                    episode: resolvedEpisode,
                     urlString: result.url.absoluteString,
                     streamingSubtitles: result.mergedSubtitles ?? [],
-                    vidLinkHlsUrl: result.vidLinkUrl?.absoluteString,
-                    movies111HlsUrl: result.movies111Url?.absoluteString,
+                    vidLoveUrl: result.vidLoveUrl?.absoluteString,
                     torrentioHlsUrl: result.torrentioUrl?.absoluteString,
                     streamingQualities: result.preloadedQualities ?? []
                 )
@@ -387,11 +396,10 @@ extension ContentDetailView {
         playResolutionTask = task
     }
 
-    func proceedWithEpisodeDownload(episode: EpisodeInfo, urlString: String, streamingSubtitles: [SubtitleTrack] = [], vidLinkHlsUrl: String? = nil, movies111HlsUrl: String? = nil, torrentioHlsUrl: String? = nil, streamingQualities: [HLSQuality] = []) {
+    func proceedWithEpisodeDownload(episode: EpisodeInfo, urlString: String, streamingSubtitles: [SubtitleTrack] = [], vidLoveUrl: String? = nil, torrentioHlsUrl: String? = nil, streamingQualities: [HLSQuality] = []) {
         selectedEpisodeForDownload = episode
         pendingDownloadUrl = urlString
-        pendingVidLinkHlsUrl = vidLinkHlsUrl
-        pendingMovies111HlsUrl = movies111HlsUrl
+        pendingVidLoveUrl = vidLoveUrl
         pendingTorrentioHlsUrl = torrentioHlsUrl?.contains(".m3u8") == true ? torrentioHlsUrl : nil
         pendingStreamingQualities = streamingQualities
         selectedDownloadSubtitles.removeAll()
@@ -402,7 +410,7 @@ extension ContentDetailView {
         var subtitles = resolveAllSubtitleTracks(for: episode)
             .filter { $0.source.isEmpty || $0.source.hasPrefix("http") }
 
-        // Merge VidLink subtitles (avoid duplicates by language)
+        // Merge streaming-provider subtitles (avoid duplicates by language)
         let existingSubLangs = Set(subtitles.map { $0.languageId })
         for sub in streamingSubtitles {
             if !existingSubLangs.contains(sub.languageId) {
@@ -430,8 +438,9 @@ extension ContentDetailView {
         // If HLS, also parse audio renditions from master playlist (async)
         let isHLS = urlString.contains(".m3u8")
         if isHLS, let hlsUrl = URL(string: urlString) {
-            let isVidLinkUrl = VidLinkService.isVidLinkProxyURL(urlString)
-            let hlsSourceName = isVidLinkUrl ? "VidLink" : viewModel.episodeHlsUrlSourceNames(for: content.id, season: episode.season, episode: episode.episode)[urlString]
+            let hlsSourceName = streamingQualities.first(where: {
+                $0.sourceUrl == urlString || $0.variantUrl == urlString
+            })?.sourceName ?? viewModel.episodeHlsUrlSourceNames(for: content.id, season: episode.season, episode: episode.episode)[urlString]
             loadingMessage = "Preparing download..."
             Task {
                 let renditions = await PlayerViewModel.parseHLSAudioRenditions(from: hlsUrl).renditions
@@ -467,8 +476,8 @@ extension ContentDetailView {
 
         let fallbackUrls = Array(quality.sourceUrls.dropFirst())
         let sourceName = quality.sourceName
-        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(primaryUrl) || sourceName == "VidLink" || sourceName == "Torrentio"
-        let downloadTmdbId = needsProviderRefresh ? resolveTmdbId() : nil
+        let needsProviderRefresh = sourceName == "VidLove" || sourceName == "Torrentio"
+        let downloadTmdbId = (needsProviderRefresh || episode != nil) ? resolveTmdbId() : nil
 
         await addToLibraryIfNeeded()
 
@@ -495,7 +504,10 @@ extension ContentDetailView {
             tmdbId: downloadTmdbId,
             sourceName: sourceName,
             selectedResolution: quality.resolution,
-            selectedVideoRange: quality.videoRange
+            selectedVideoRange: quality.videoRange,
+            episodeIntro: episode?.intro,
+            episodeIntroDuration: episode?.introDuration,
+            episodeEnd: episode?.end
         )
     }
 
@@ -940,12 +952,11 @@ extension ContentDetailView {
 
     func proceedToQualityPicker(urlString: String) {
         let isHLS = HLSQuality.looksLikeHLS(urlString)
-        let vidLinkIsHLS = pendingVidLinkHlsUrl.map(HLSQuality.looksLikeHLS) ?? false
-        let movies111IsHLS = pendingMovies111HlsUrl.map(HLSQuality.looksLikeHLS) ?? false
+        let vidLoveIsHLS = pendingVidLoveUrl.map(HLSQuality.looksLikeHLS) ?? false
         let torrentioIsHLS = pendingTorrentioHlsUrl.map(HLSQuality.looksLikeHLS) ?? false
         let directQualities = pendingStreamingQualities.filter { $0.isDirectFileSource }
 
-        if isHLS || vidLinkIsHLS || movies111IsHLS || torrentioIsHLS || !directQualities.isEmpty {
+        if isHLS || vidLoveIsHLS || torrentioIsHLS || !directQualities.isEmpty {
             loadingMessage = "Preparing download..."
             isLoadingQualities = true
 
@@ -959,14 +970,10 @@ extension ContentDetailView {
                 allUrls.insert(urlString, at: 0)
             }
 
-            // Include VidLink HLS URL as a source for quality parsing
-            if let vidLinkUrl = pendingVidLinkHlsUrl, HLSQuality.looksLikeHLS(vidLinkUrl), !allUrls.contains(vidLinkUrl) {
-                allUrls.append(vidLinkUrl)
-            }
-
-            // Include 111Movies HLS URL as a source for quality parsing
-            if let movies111Url = pendingMovies111HlsUrl, HLSQuality.looksLikeHLS(movies111Url), !allUrls.contains(movies111Url) {
-                allUrls.append(movies111Url)
+            if let vidLoveUrl = pendingVidLoveUrl,
+               HLSQuality.looksLikeHLS(vidLoveUrl),
+               !allUrls.contains(vidLoveUrl) {
+                allUrls.append(vidLoveUrl)
             }
 
             if let torrentioUrl = pendingTorrentioHlsUrl, HLSQuality.looksLikeHLS(torrentioUrl), !allUrls.contains(torrentioUrl) {
@@ -981,21 +988,15 @@ extension ContentDetailView {
                 } else {
                     sourceNames = viewModel.hlsUrlSourceNames(for: content.id)
                 }
-                // Add VidLink source name
-                if let vidLinkUrl = pendingVidLinkHlsUrl, HLSQuality.looksLikeHLS(vidLinkUrl) {
-                    sourceNames[vidLinkUrl] = "VidLink"
-                }
-                // Add 111Movies source name
-                if let movies111Url = pendingMovies111HlsUrl, HLSQuality.looksLikeHLS(movies111Url) {
-                    sourceNames[movies111Url] = "111Movies"
+                if let vidLoveUrl = pendingVidLoveUrl, HLSQuality.looksLikeHLS(vidLoveUrl) {
+                    sourceNames[vidLoveUrl] = "VidLove"
                 }
                 if let torrentioUrl = pendingTorrentioHlsUrl, HLSQuality.looksLikeHLS(torrentioUrl) {
                     sourceNames[torrentioUrl] = "Torrentio"
                 }
 
                 let parsedHlsQualities = await PlayerViewModel.parseAllSourceQualities(from: allUrls, sourceNames: sourceNames)
-                let sourceOnlyQualities = singlePlaylistSourceQualities(parsedHlsQualities: parsedHlsQualities)
-                let allQualities = parsedHlsQualities + directQualities + sourceOnlyQualities
+                let allQualities = parsedHlsQualities + directQualities
 
                 // Convert to MultiSourceQuality for the download flow (one per source per quality level)
                 let merged = allQualities.map { q in
@@ -1038,8 +1039,8 @@ extension ContentDetailView {
     func queuePendingDownloadWithoutQualityPicker(urlString: String) {
         let episode = selectedEpisodeForDownload
         let sourceName = pendingSourceName(for: urlString)
-        let needsProviderRefresh = VidLinkService.isVidLinkProxyURL(urlString) || sourceName == "VidLink" || sourceName == "Torrentio"
-        let downloadTmdbId = needsProviderRefresh ? resolveTmdbId() : nil
+        let needsProviderRefresh = sourceName == "VidLove" || sourceName == "Torrentio"
+        let downloadTmdbId = (needsProviderRefresh || episode != nil) ? resolveTmdbId() : nil
 
         Task {
             await MainActor.run {
@@ -1057,7 +1058,10 @@ extension ContentDetailView {
                     quality: .auto,
                     allEpisodes: allEpisodes,
                     tmdbId: downloadTmdbId,
-                    sourceName: sourceName
+                    sourceName: sourceName,
+                    episodeIntro: episode.intro,
+                    episodeIntroDuration: episode.introDuration,
+                    episodeEnd: episode.end
                 )
                 await startSelectedTrackDownloads(episode: episode)
             } else {
@@ -1078,31 +1082,9 @@ extension ContentDetailView {
     }
 
     private func pendingSourceName(for urlString: String) -> String? {
-        if urlString == pendingVidLinkHlsUrl { return "VidLink" }
-        if urlString == pendingMovies111HlsUrl { return "111Movies" }
+        if urlString == pendingVidLoveUrl { return "VidLove" }
         if urlString == pendingTorrentioHlsUrl { return "Torrentio" }
         return nil
-    }
-
-    private func singlePlaylistSourceQualities(parsedHlsQualities: [HLSQuality]) -> [HLSQuality] {
-        guard let movies111Url = pendingMovies111HlsUrl,
-              HLSQuality.looksLikeHLS(movies111Url),
-              !parsedHlsQualities.contains(where: { $0.sourceUrl == movies111Url }) else {
-            return []
-        }
-
-        return [
-            HLSQuality(
-                name: "HLS",
-                bandwidth: 0,
-                resolution: nil,
-                videoRange: nil,
-                frameRate: nil,
-                sourceUrl: movies111Url,
-                variantUrl: nil,
-                sourceName: "111Movies"
-            )
-        ]
     }
 
     private var downloadPickerShouldPreferHDR: Bool {
