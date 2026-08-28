@@ -205,13 +205,13 @@ extension VideoPlayerView {
 
     func performPlayNextEpisode(skipper: URLCheckSkipper) async {
         let onCheckingURL: @MainActor @Sendable (String) -> Void = { candidate in
-            guard self.isTransitioningToNext else { return }
+            guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
             let maxLen = VideoPlayerView.maxDisplayUrlLength
             let display = candidate.count > maxLen ? "..." + candidate.suffix(VideoPlayerView.displayUrlSuffixLength) : candidate
             self.onlineSwitchFetchingURL = String(display)
         }
         let onPreparingPlayback: @MainActor @Sendable () -> Void = {
-            guard self.isTransitioningToNext else { return }
+            guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
             self.onlineSwitchFetchingURL = nil
         }
 
@@ -346,6 +346,7 @@ extension VideoPlayerView {
             }
             .sink { [weak viewModel] _, readyDuration in
                 guard let viewModel = viewModel else { return }
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
                 
@@ -357,6 +358,7 @@ extension VideoPlayerView {
                         "playNextEpisode: MPV opened at \(startupPosition)s during load"
                     )
                     Task { @MainActor in
+                        guard self.acceptsAsyncPlayerUpdates else { return }
                         self.markSeekedPlaybackNeedsVideoGate()
                         self.isTransitioningToNext = false
                         self.isAdvancingEpisode = false
@@ -370,6 +372,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("playNextEpisode: Seeking to \(clampedTime)s (saved=\(savedTimestamp)s)")
                     viewModel.seek(to: clampedTime) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             StreamifyLogger.log("playNextEpisode: Seek completed, starting playback")
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
@@ -381,6 +384,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("playNextEpisode: No saved progress, seeking to start before restoring audio")
                     viewModel.seek(to: 0) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
                             self.isAdvancingEpisode = false
@@ -422,13 +426,13 @@ extension VideoPlayerView {
 
     func performAddToLibraryAndPlayNext(skipper: URLCheckSkipper) async {
         let onCheckingURL: @MainActor @Sendable (String) -> Void = { candidate in
-            guard self.isTransitioningToNext else { return }
+            guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
             let maxLen = VideoPlayerView.maxDisplayUrlLength
             let display = candidate.count > maxLen ? "..." + candidate.suffix(VideoPlayerView.displayUrlSuffixLength) : candidate
             self.onlineSwitchFetchingURL = String(display)
         }
         let onPreparingPlayback: @MainActor @Sendable () -> Void = {
-            guard self.isTransitioningToNext else { return }
+            guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
             self.onlineSwitchFetchingURL = nil
         }
 
@@ -551,6 +555,7 @@ extension VideoPlayerView {
             }
             .sink { [weak viewModel] _, readyDuration in
                 guard let viewModel = viewModel else { return }
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
 
@@ -559,6 +564,7 @@ extension VideoPlayerView {
                         "addToLibraryAndPlayNext: MPV opened at \(startupPosition)s during load"
                     )
                     Task { @MainActor in
+                        guard self.acceptsAsyncPlayerUpdates else { return }
                         self.markSeekedPlaybackNeedsVideoGate()
                         self.isTransitioningToNext = false
                         self.isAdvancingEpisode = false
@@ -572,6 +578,7 @@ extension VideoPlayerView {
                     let clampedTime = clampedResumeTime(savedTimestamp, duration: duration)
                     viewModel.seek(to: clampedTime) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
                             self.isAdvancingEpisode = false
@@ -582,6 +589,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("addToLibraryAndPlayNext: No saved progress, seeking to start before restoring audio")
                     viewModel.seek(to: 0) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.isTransitioningToNext = false
                             self.isAdvancingEpisode = false

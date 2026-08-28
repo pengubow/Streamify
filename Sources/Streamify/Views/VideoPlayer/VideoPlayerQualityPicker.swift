@@ -48,12 +48,12 @@ extension VideoPlayerView {
             let tmdbId = resolveTmdbId()
 
             let onCheckingURL: @MainActor @Sendable (String) -> Void = { candidate in
-                guard self.isTransitioningToNext else { return }
+                guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
                 let display = candidate.count > Self.maxDisplayUrlLength ? "..." + candidate.suffix(Self.displayUrlSuffixLength) : candidate
                 self.onlineSwitchFetchingURL = String(display)
             }
             let onPreparingPlayback: @MainActor @Sendable () -> Void = {
-                guard self.isTransitioningToNext else { return }
+                guard self.acceptsAsyncPlayerUpdates, self.isTransitioningToNext else { return }
                 self.onlineSwitchFetchingURL = nil
             }
 
@@ -88,6 +88,7 @@ extension VideoPlayerView {
 
             guard let result = resolved else {
                 await MainActor.run {
+                    guard acceptsAsyncPlayerUpdates else { return }
                     isTransitioningToNext = false
                     if wasPlaying {
                         if !resumeSeparateAudio(at: viewModel.realPlaybackTime) {
@@ -99,6 +100,7 @@ extension VideoPlayerView {
             }
 
             await MainActor.run {
+                guard acceptsAsyncPlayerUpdates else { return }
                 if let merged = result.mergedSubtitles, !merged.isEmpty {
                     currentStreamingSubtitles = merged
                 }
@@ -336,6 +338,7 @@ extension VideoPlayerView {
             }
             .sink { [weak viewModel] _, readyDuration in
                 guard let viewModel = viewModel else { return }
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 guard !self.hasProcessedReadyState else { return }
                 self.hasProcessedReadyState = true
 
@@ -344,6 +347,7 @@ extension VideoPlayerView {
                         "switchPlayerToUrl: MPV opened at \(startupPosition)s during load"
                     )
                     Task { @MainActor in
+                        guard self.acceptsAsyncPlayerUpdates else { return }
                         self.markSeekedPlaybackNeedsVideoGate()
                         self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                     }
@@ -356,6 +360,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("switchPlayerToUrl: seeking to \(clampedTime)s (captured=\(realTime)s duration=\(durationForClamp)s)")
                     viewModel.seek(to: clampedTime) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                             if isHLS {
@@ -372,6 +377,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("switchPlayerToUrl: no saved position (realTime=\(realTime)), playing from start")
                     viewModel.seek(to: 0) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.reapplyPlaybackPrerequisitesForCurrentEpisode(shouldStartPlayback: true)
                             if isHLS {

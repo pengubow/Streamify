@@ -565,6 +565,7 @@ extension VideoPlayerView {
                 let statusObserver = item.observe(\.status, options: [.new]) { [self] observedItem, _ in
                     if observedItem.status == .failed {
                         DispatchQueue.main.async {
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             if isMPVAudioTrack {
                                 StreamifyLogger.log("Audio: Native MKV audio failed to play for \(track.displayName), falling back to MPV")
                                 self.externalAudioPlayer?.pause()
@@ -646,7 +647,7 @@ extension VideoPlayerView {
     }
 
     func finishRemoteAudioLoad(generation: Int) -> Bool {
-        guard generation == remoteAudioLoadGeneration, !hasCalledDismiss else { return false }
+        guard generation == remoteAudioLoadGeneration, acceptsAsyncPlayerUpdates else { return false }
         remoteAudioLoadTask = nil
         return true
     }
@@ -657,6 +658,7 @@ extension VideoPlayerView {
         // Use periodic observation for buffer state
         let bufferObserver = item.observe(\.isPlaybackBufferEmpty, options: [.new]) { [self] item, change in
             DispatchQueue.main.async {
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 if item.isPlaybackBufferEmpty {
                     self.isAudioBuffering = true
                 }
@@ -664,6 +666,7 @@ extension VideoPlayerView {
         }
         let keepUpObserver = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [self] item, change in
             DispatchQueue.main.async {
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 if item.isPlaybackLikelyToKeepUp {
                     self.isAudioBuffering = false
                 }
@@ -950,6 +953,7 @@ extension VideoPlayerView {
         if isAudioLocallyAvailable(track) {
             StreamifyLogger.log("Audio: Track \(track.language) local file exists — server may be starting, retrying in 1s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 if let url = self.resolveAudioURL(for: track) {
                     self.loadExternalAudio(from: url, track: track, shouldResume: shouldResume)
                 } else {

@@ -435,7 +435,7 @@ extension VideoPlayerView {
     }
 
     func finishSubtitleLoad(generation: Int) -> Bool {
-        guard generation == subtitleLoadGeneration, !hasCalledDismiss else { return false }
+        guard generation == subtitleLoadGeneration, acceptsAsyncPlayerUpdates else { return false }
         isSubtitlePreparing = false
         subtitleLoadTask = nil
         return true

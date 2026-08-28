@@ -22,6 +22,8 @@ extension VideoPlayerView {
         onlineSwitchSkipper?.skip()
         onlineSwitchSkipper = nil
         onlineSwitchFetchingURL = nil
+        isTransitioningToNext = false
+        isAdvancingEpisode = false
 
         switchToOnlineTask?.cancel()
         switchToOnlineTask = nil
@@ -48,6 +50,22 @@ extension VideoPlayerView {
         viewModel.cancelPendingRequests()
     }
 
+    func cancelPlayerScheduledWork() {
+        let workItems = [
+            hideWorkItem,
+            hideVolumeOverlayTask,
+            skipBackwardFadeInTask,
+            skipBackwardFadeOutTask,
+            skipBackwardRestoreTask,
+            skipForwardFadeInTask,
+            skipForwardFadeOutTask,
+            skipForwardRestoreTask
+        ]
+        workItems.forEach { $0?.cancel() }
+        hideWorkItem = nil
+        hideVolumeOverlayTask = nil
+    }
+
     func teardownPlayerAfterDismissal() {
         guard !hasPerformedPlayerTeardown else { return }
         hasPerformedPlayerTeardown = true
@@ -55,10 +73,7 @@ extension VideoPlayerView {
         acceptsPlayerControlInput = false
         enablePlayerControlInputTask?.cancel()
         enablePlayerControlInputTask = nil
-        hideWorkItem?.cancel()
-        hideWorkItem = nil
-        hideVolumeOverlayTask?.cancel()
-        hideVolumeOverlayTask = nil
+        cancelPlayerScheduledWork()
         cancelPendingAudioSync()
         cancelPlayerScopedRequests()
 
@@ -152,6 +167,7 @@ extension VideoPlayerView {
             }
             .sink { [weak viewModel] _, readyDuration in
                 guard let viewModel = viewModel else { return }
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 
                 // Skip if we've already processed this ready state
                 guard !self.hasProcessedReadyState else { return }
@@ -165,6 +181,7 @@ extension VideoPlayerView {
                             + "restoring audio and starting playback"
                     )
                     Task { @MainActor in
+                        guard self.acceptsAsyncPlayerUpdates else { return }
                         self.markSeekedPlaybackNeedsVideoGate()
                         self.restorePlaybackPrerequisitesAfterSeek(shouldStartPlayback: true)
                     }
@@ -178,6 +195,7 @@ extension VideoPlayerView {
                     // Seek to saved position before starting playback.
                     viewModel.seek(to: clampedTime) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             // Restore audio track after seek completes (at the correct position)
                             StreamifyLogger.log("VideoPlayerView: Seek complete, restoring audio and starting playback")
                             self.markSeekedPlaybackNeedsVideoGate()
@@ -188,6 +206,7 @@ extension VideoPlayerView {
                     StreamifyLogger.log("VideoPlayerView: No saved progress, seeking to start before restoring audio")
                     viewModel.seek(to: 0) {
                         Task { @MainActor in
+                            guard self.acceptsAsyncPlayerUpdates else { return }
                             self.markSeekedPlaybackNeedsVideoGate()
                             self.restorePlaybackPrerequisitesAfterSeek(shouldStartPlayback: true)
                         }
@@ -218,7 +237,7 @@ extension VideoPlayerView {
                 guard !Task.isCancelled else { return }
                 let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: currentVideoURL.absoluteString) }
                 await MainActor.run {
-                    guard !Task.isCancelled, !hasCalledDismiss else { return }
+                    guard !Task.isCancelled, acceptsAsyncPlayerUpdates else { return }
                     hlsAudioTracks = parsed
                     embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                     // Re-apply selected audio or preferred language now that HLS tracks are available
@@ -241,7 +260,7 @@ extension VideoPlayerView {
                         let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: masterPath.absoluteString) }
                         if !parsed.isEmpty {
                             await MainActor.run {
-                                guard !Task.isCancelled, !hasCalledDismiss else { return }
+                                guard !Task.isCancelled, acceptsAsyncPlayerUpdates else { return }
                                 hlsAudioTracks = parsed
                                 embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                                 reapplyAudioAfterTrackDiscovery()
@@ -283,7 +302,7 @@ extension VideoPlayerView {
                         let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: url.absoluteString) }
                         if !parsed.isEmpty {
                             await MainActor.run {
-                                guard !Task.isCancelled, !hasCalledDismiss else { return }
+                                guard !Task.isCancelled, acceptsAsyncPlayerUpdates else { return }
                                 hlsAudioTracks = parsed
                                 embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                                 reapplyAudioAfterTrackDiscovery()
@@ -324,7 +343,8 @@ extension VideoPlayerView {
             let enriched = await IntroDBService.enriching(seededEpisode, tmdbId: tmdbId)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard let currentEpisode = currentEpisodeInfo,
+                guard acceptsAsyncPlayerUpdates,
+                      let currentEpisode = currentEpisodeInfo,
                       currentEpisode.id == episodeId else { return }
                 let updatedEpisode = currentEpisode.copying(
                     intro: .some(currentEpisode.intro ?? enriched.intro),
@@ -679,7 +699,7 @@ extension VideoPlayerView {
                         if mediaSubType == kAudioFormatEnhancedAC3 || mediaSubType == kAudioFormatAC3 {
                             let codecName = mediaSubType == kAudioFormatEnhancedAC3 ? "EAC-3" : "AC-3"
                             await MainActor.run {
-                                guard !Task.isCancelled, !hasCalledDismiss else { return }
+                                guard !Task.isCancelled, acceptsAsyncPlayerUpdates else { return }
                                 embeddedAudioIsSpatial = true
                                 StreamifyLogger.log("Audio: Detected spatial audio (\(codecName)/Atmos) in embedded stream")
                             }
@@ -699,6 +719,7 @@ extension VideoPlayerView {
     func startProgressSaving() {
         saveProgressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             Task { @MainActor in
+                guard self.acceptsAsyncPlayerUpdates else { return }
                 self.saveProgress()
             }
         }
