@@ -503,6 +503,7 @@ extension ContentDetailView {
             fallbackUrls: fallbackUrls,
             tmdbId: downloadTmdbId,
             sourceName: sourceName,
+            isHLSStream: quality.isHLSStream,
             selectedResolution: quality.resolution,
             selectedVideoRange: quality.videoRange,
             episodeIntro: episode?.intro,
@@ -951,12 +952,16 @@ extension ContentDetailView {
     }
 
     func proceedToQualityPicker(urlString: String) {
-        let isHLS = HLSQuality.looksLikeHLS(urlString)
-        let vidLoveIsHLS = pendingVidLoveUrl.map(HLSQuality.looksLikeHLS) ?? false
+        let isHLS = HLSQuality.looksLikeHLS(
+            urlString,
+            qualities: pendingStreamingQualities
+        )
+        let vidLoveIsHLS = pendingVidLoveUrl.map {
+            HLSQuality.looksLikeHLS($0, qualities: pendingStreamingQualities)
+        } ?? false
         let torrentioIsHLS = pendingTorrentioHlsUrl.map(HLSQuality.looksLikeHLS) ?? false
-        let directQualities = pendingStreamingQualities.filter { $0.isDirectFileSource }
 
-        if isHLS || vidLoveIsHLS || torrentioIsHLS || !directQualities.isEmpty {
+        if isHLS || vidLoveIsHLS || torrentioIsHLS || !pendingStreamingQualities.isEmpty {
             loadingMessage = "Preparing download..."
             isLoadingQualities = true
 
@@ -971,7 +976,7 @@ extension ContentDetailView {
             }
 
             if let vidLoveUrl = pendingVidLoveUrl,
-               HLSQuality.looksLikeHLS(vidLoveUrl),
+               HLSQuality.looksLikeHLS(vidLoveUrl, qualities: pendingStreamingQualities),
                !allUrls.contains(vidLoveUrl) {
                 allUrls.append(vidLoveUrl)
             }
@@ -988,15 +993,21 @@ extension ContentDetailView {
                 } else {
                     sourceNames = viewModel.hlsUrlSourceNames(for: content.id)
                 }
-                if let vidLoveUrl = pendingVidLoveUrl, HLSQuality.looksLikeHLS(vidLoveUrl) {
+                if let vidLoveUrl = pendingVidLoveUrl,
+                   HLSQuality.looksLikeHLS(vidLoveUrl, qualities: pendingStreamingQualities) {
                     sourceNames[vidLoveUrl] = "VidLove"
                 }
                 if let torrentioUrl = pendingTorrentioHlsUrl, HLSQuality.looksLikeHLS(torrentioUrl) {
                     sourceNames[torrentioUrl] = "Torrentio"
                 }
 
-                let parsedHlsQualities = await PlayerViewModel.parseAllSourceQualities(from: allUrls, sourceNames: sourceNames)
-                let allQualities = parsedHlsQualities + directQualities
+                let preloadedSourceUrls = Set(pendingStreamingQualities.compactMap(\.sourceUrl))
+                let urlsToParse = allUrls.filter { !preloadedSourceUrls.contains($0) }
+                let parsedHlsQualities = await PlayerViewModel.parseAllSourceQualities(
+                    from: urlsToParse,
+                    sourceNames: sourceNames
+                )
+                let allQualities = pendingStreamingQualities + parsedHlsQualities
 
                 // Convert to MultiSourceQuality for the download flow (one per source per quality level)
                 let merged = allQualities.map { q in
@@ -1008,7 +1019,8 @@ extension ContentDetailView {
                         frameRate: q.frameRate,
                         sourceUrls: [q.sourceUrl].compactMap { $0 },
                         sourceName: q.sourceName,
-                        displayDetail: q.displayDetail
+                        displayDetail: q.displayDetail,
+                        isHLSStream: q.isHLSStream
                     )
                 }
 
@@ -1020,7 +1032,8 @@ extension ContentDetailView {
                     loadingMessage = nil
                     if merged.isEmpty {
                         StreamifyLogger.log("Quality picker: No qualities found from any source, not showing picker")
-                        queuePendingDownloadWithoutQualityPicker(urlString: urlString)
+                        downloadError = "No video quality options could be prepared. Nothing was downloaded."
+                        showDownloadError = true
                     } else {
                         // Pre-select the best available quality for this display.
                         selectedDownloadQualities.removeAll()
@@ -1039,6 +1052,10 @@ extension ContentDetailView {
     func queuePendingDownloadWithoutQualityPicker(urlString: String) {
         let episode = selectedEpisodeForDownload
         let sourceName = pendingSourceName(for: urlString)
+        let isHLSStream = HLSQuality.looksLikeHLS(
+            urlString,
+            qualities: pendingStreamingQualities
+        )
         let needsProviderRefresh = sourceName == "VidLove" || sourceName == "Torrentio"
         let downloadTmdbId = (needsProviderRefresh || episode != nil) ? resolveTmdbId() : nil
 
@@ -1059,6 +1076,7 @@ extension ContentDetailView {
                     allEpisodes: allEpisodes,
                     tmdbId: downloadTmdbId,
                     sourceName: sourceName,
+                    isHLSStream: isHLSStream,
                     episodeIntro: episode.intro,
                     episodeIntroDuration: episode.introDuration,
                     episodeEnd: episode.end
@@ -1070,7 +1088,8 @@ extension ContentDetailView {
                     videoUrl: urlString,
                     quality: .auto,
                     tmdbId: downloadTmdbId,
-                    sourceName: sourceName
+                    sourceName: sourceName,
+                    isHLSStream: isHLSStream
                 )
                 await startSelectedTrackDownloads(episode: nil)
             }

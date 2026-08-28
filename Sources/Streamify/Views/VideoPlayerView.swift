@@ -39,6 +39,7 @@ struct VideoPlayerView: View {
     @State var isUserSeeking: Bool = false  // Track if user is dragging the seek bar
     @State var previewTime: Double = 0  // Time preview while seeking
     @State var hasCalledDismiss: Bool = false  // Prevent double-calling onDismiss
+    @State var hasPerformedPlayerTeardown: Bool = false
     @State var playerReadyCancellable: AnyCancellable?  // For observing player ready state
 
     @State var hasProcessedReadyState: Bool = false  // Track if we've handled the ready state for this episode
@@ -62,6 +63,10 @@ struct VideoPlayerView: View {
     /// Non-nil while `playNextEpisode()` or `addToLibraryAndPlayNext()` is resolving the next episode URL.
     @State var nextEpisodeTask: Task<Void, Never>? = nil
     @State var introDBTask: Task<Void, Never>? = nil
+    @State var hlsAudioDiscoveryTask: Task<Void, Never>? = nil
+    @State var embeddedAudioInspectionTask: Task<Void, Never>? = nil
+    @State var remoteAudioLoadTask: Task<Void, Never>? = nil
+    @State var remoteAudioLoadGeneration: Int = 0
     /// Non-nil while a specific URL is being validated during `switchToOnlinePlay()`.
     /// Set to `nil` during provider fetches that can't be skipped individually.
     @State var onlineSwitchFetchingURL: String? = nil
@@ -206,6 +211,10 @@ struct VideoPlayerView: View {
     // Check if this is a movie (no episodeInfo means movie)
     var isMovie: Bool {
         currentEpisodeInfo == nil
+    }
+
+    var acceptsAsyncPlayerUpdates: Bool {
+        !hasCalledDismiss && !hasPerformedPlayerTeardown
     }
     
     // Get all episodes
@@ -1089,36 +1098,9 @@ struct VideoPlayerView: View {
             }
         }
         .onDisappear {
-            acceptsPlayerControlInput = false
-            enablePlayerControlInputTask?.cancel()
-            enablePlayerControlInputTask = nil
-            resetPlayerPickerPresentationState(context: "player exit")
-            pausedPlaybackForSceneInterruption = false
-            shouldResumeAfterSceneInterruption = false
+            teardownPlayerAfterDismissal()
             // Force portrait when leaving video player
             OrientationManager.shared.rotate(to: .portrait)
-            // Save progress before leaving
-            saveProgress()
-            // Handle end-of-playback: mark movies/series as watched, advance to next episode
-            handleEndOfPlayback()
-            viewModel.cleanup()
-            MatroskaPlaybackSupport.cleanupTransientStreams()
-            stopProgressSaving()
-            externalAudioPlayer?.pause()
-            externalAudioPlayer = nil
-            cancelNativeMatroskaSubtitlePreparation()
-            cancelSubtitleLoad()
-            stopCompensatedEmbeddedAudio(unmuteMain: false)
-            audioBufferingObservers.removeAll()
-            teardownRemoteCommandHandlers()
-            hideVolumeOverlayTask?.cancel()
-            hideVolumeOverlayTask = nil
-            resetPiPSeekObservation()
-            // Cancel any in-progress track download task
-            downloadingTrackTask?.cancel()
-            downloadingTrackTask = nil
-            introDBTask?.cancel()
-            introDBTask = nil
             // Call onDismiss to ensure LibraryView refreshes (handles swipe-to-dismiss)
             // Only call if not already called from back button
             if !hasCalledDismiss {
@@ -1191,16 +1173,19 @@ struct VideoPlayerView: View {
             
             // Re-parse HLS audio tracks from master.m3u8 (may have been saved by a quality download)
             let folderPaths = buildFolderPaths()
-            Task {
+            hlsAudioDiscoveryTask?.cancel()
+            hlsAudioDiscoveryTask = Task {
                 for folder in folderPaths where !folder.isEmpty {
                     let masterPath = ContentImportService.contentDirectoryURL
                         .appendingPathComponent(folder)
                         .appendingPathComponent("master.m3u8")
                     if FileManager.default.fileExists(atPath: masterPath.path) {
                         let result = await PlayerViewModel.parseHLSAudioRenditions(from: masterPath)
+                        guard !Task.isCancelled else { return }
                         let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: masterPath.absoluteString) }
                         if !parsed.isEmpty {
                             await MainActor.run {
+                                guard !Task.isCancelled, !hasCalledDismiss else { return }
                                 hlsAudioTracks = parsed
                             }
                             break

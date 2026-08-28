@@ -517,6 +517,10 @@ extension VideoPlayerView {
     
     // Load external audio and sync with video
     func loadExternalAudio(from url: URL, track: AudioTrack, shouldResume: Bool? = nil) {
+        remoteAudioLoadGeneration += 1
+        let loadGeneration = remoteAudioLoadGeneration
+        remoteAudioLoadTask?.cancel()
+        remoteAudioLoadTask = nil
         StreamifyLogger.log("Audio: Loading external audio from \(url)")
         let isMPVAudioTrack = viewModel.isMPVAudioTrack(track)
         separateAudioSyncOffsetSeconds = 0
@@ -589,7 +593,7 @@ extension VideoPlayerView {
             StreamifyLogger.log("Audio: Loaded local audio for \(track.language), wasPlaying=\(wasPlaying)")
         } else {
             // Remote URL - load asynchronously with buffering detection
-            Task {
+            remoteAudioLoadTask = Task {
                 do {
                     // Verify URL is reachable with HEAD request (for non-HLS; HLS just attempts playback)
                     if !isHLS {
@@ -597,17 +601,21 @@ extension VideoPlayerView {
                         headRequest.httpMethod = "HEAD"
                         headRequest.timeoutInterval = 10
                         let (_, response) = try await URLSession.shared.data(for: headRequest)
+                        guard !Task.isCancelled else { return }
                         guard let httpResponse = response as? HTTPURLResponse,
                               (200...399).contains(httpResponse.statusCode) else {
                             await MainActor.run {
+                                guard finishRemoteAudioLoad(generation: loadGeneration) else { return }
                                 StreamifyLogger.log("Audio: Remote audio returned non-200 for \(track.language)")
                                 showAudioErrorAlert = true
                             }
                             return
                         }
                     }
-                    
+
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
+                        guard finishRemoteAudioLoad(generation: loadGeneration) else { return }
                         let audioPlayer = AVPlayer(url: playbackURL)
                         // Enable concurrent downloads for HLS audio
                         if isHLS {
@@ -626,13 +634,21 @@ extension VideoPlayerView {
                         StreamifyLogger.log("Audio: Loaded remote audio for \(track.language), pausing video until audio is ready")
                     }
                 } catch {
+                    guard !Task.isCancelled, (error as? URLError)?.code != .cancelled else { return }
                     await MainActor.run {
+                        guard finishRemoteAudioLoad(generation: loadGeneration) else { return }
                         StreamifyLogger.log("Audio: Failed to load remote audio for \(track.language): \(error.localizedDescription)")
                         showAudioErrorAlert = true
                     }
                 }
             }
         }
+    }
+
+    func finishRemoteAudioLoad(generation: Int) -> Bool {
+        guard generation == remoteAudioLoadGeneration, !hasCalledDismiss else { return false }
+        remoteAudioLoadTask = nil
+        return true
     }
     
     // Observe external audio player buffering to pause video when audio is not ready

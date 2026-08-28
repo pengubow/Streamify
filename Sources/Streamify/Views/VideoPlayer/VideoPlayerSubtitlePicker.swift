@@ -434,6 +434,13 @@ extension VideoPlayerView {
         isSubtitlePreparing = false
     }
 
+    func finishSubtitleLoad(generation: Int) -> Bool {
+        guard generation == subtitleLoadGeneration, !hasCalledDismiss else { return false }
+        isSubtitlePreparing = false
+        subtitleLoadTask = nil
+        return true
+    }
+
     func mpvSubtitleIndex(for track: SubtitleTrack) -> Int {
         if let indexValue = URLComponents(string: track.source)?
             .queryItems?
@@ -489,20 +496,27 @@ extension VideoPlayerView {
         let metadataFolder = effectiveFolderPath
         updateTrackInMetadata(metadataFolder: metadataFolder, subtitleLanguage: track.language, localSource: downloadURL.absoluteString, sourceName: track.sourceName)
         
-        Task {
+        cancelSubtitleLoad()
+        let generation = subtitleLoadGeneration
+        isSubtitlePreparing = true
+        subtitleLoadTask = Task {
             do {
                 let (data, _) = try await URLSession.shared.data(from: downloadURL)
+                try Task.checkCancellation()
                 if let vttContent = String(data: data, encoding: .utf8) {
                     let cues = await Task.detached(priority: .userInitiated) {
                         parseVTT(vttContent)
                     }.value
+                    try Task.checkCancellation()
                     await MainActor.run {
+                        guard finishSubtitleLoad(generation: generation) else { return }
                         self.subtitleCues = cues
                         StreamifyLogger.log("Subtitle: Re-downloaded and loaded \(cues.count) cues for \(track.language)")
                         completion()
                     }
                 } else {
                     await MainActor.run {
+                        guard finishSubtitleLoad(generation: generation) else { return }
                         StreamifyLogger.log("Subtitle: Re-download returned invalid data for \(track.language)")
                         removeSubtitleFromMetadata(language: track.language)
                         showSubtitleErrorAlert = true
@@ -510,7 +524,9 @@ extension VideoPlayerView {
                     }
                 }
             } catch {
+                guard !Task.isCancelled, (error as? URLError)?.code != .cancelled else { return }
                 await MainActor.run {
+                    guard finishSubtitleLoad(generation: generation) else { return }
                     StreamifyLogger.log("Subtitle: Re-download failed for \(track.language): \(error.localizedDescription)")
                     removeSubtitleFromMetadata(language: track.language)
                     showSubtitleErrorAlert = true
@@ -620,9 +636,7 @@ extension VideoPlayerView {
                     }
                     guard let loadedContent = String(data: data, encoding: .utf8) else {
                         await MainActor.run {
-                            guard generation == self.subtitleLoadGeneration else { return }
-                            self.isSubtitlePreparing = false
-                            self.subtitleLoadTask = nil
+                            guard finishSubtitleLoad(generation: generation) else { return }
                             StreamifyLogger.log("Subtitle: Failed to decode VTT from \(url.absoluteString)")
                             completion()
                         }
@@ -638,9 +652,7 @@ extension VideoPlayerView {
                 try Task.checkCancellation()
 
                 await MainActor.run {
-                    guard generation == self.subtitleLoadGeneration else { return }
-                    self.isSubtitlePreparing = false
-                    self.subtitleLoadTask = nil
+                    guard finishSubtitleLoad(generation: generation) else { return }
                     self.subtitleCues = cues
                     let source = url.isFileURL ? "local file" : "remote URL"
                     StreamifyLogger.log("Subtitle: Loaded \(cues.count) cues from \(source)")
@@ -648,9 +660,7 @@ extension VideoPlayerView {
                 }
             } catch {
                 await MainActor.run {
-                    guard generation == self.subtitleLoadGeneration else { return }
-                    self.isSubtitlePreparing = false
-                    self.subtitleLoadTask = nil
+                    guard finishSubtitleLoad(generation: generation) else { return }
                     if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                         return
                     }

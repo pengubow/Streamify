@@ -40,6 +40,7 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
     let quality: VideoQuality
     let selectedBandwidth: Double?  // Selected HLS bandwidth for quality
     let qualityName: String?  // Human-readable quality name (e.g., "1080p")
+    var isHLSStream: Bool
     let dateAdded: Date
     var fallbackUrls: [String]  // Alternative source URLs to try on failure
 
@@ -119,6 +120,7 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         case quality = "q"
         case selectedBandwidth = "sb"
         case qualityName = "qn"
+        case isHLSStream = "hs"
         case dateAdded = "da"
         case progress = "p"
         case status = "s"
@@ -155,6 +157,7 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         quality: VideoQuality = .auto,
         selectedBandwidth: Double? = nil,
         qualityName: String? = nil,
+        isHLSStream: Bool = false,
         episodeIntro: Double? = nil,
         episodeIntroDuration: Double? = nil,
         episodeEnd: Double? = nil,
@@ -169,6 +172,7 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         self.quality = quality
         self.selectedBandwidth = selectedBandwidth
         self.qualityName = qualityName
+        self.isHLSStream = isHLSStream
         self.episodeIntro = episodeIntro
         self.episodeIntroDuration = episodeIntroDuration
         self.episodeEnd = episodeEnd
@@ -188,6 +192,8 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         quality = try c.decodeIfPresent(VideoQuality.self, forKey: .quality) ?? lc.decode(VideoQuality.self, forKey: .quality)
         selectedBandwidth = try c.decodeIfPresent(Double.self, forKey: .selectedBandwidth) ?? lc.decodeIfPresent(Double.self, forKey: .selectedBandwidth)
         qualityName = try c.decodeIfPresent(String.self, forKey: .qualityName) ?? lc.decodeIfPresent(String.self, forKey: .qualityName)
+        isHLSStream = try c.decodeIfPresent(Bool.self, forKey: .isHLSStream)
+            ?? videoUrl.localizedCaseInsensitiveContains(".m3u8")
         dateAdded = try c.decodeIfPresent(Date.self, forKey: .dateAdded) ?? lc.decode(Date.self, forKey: .dateAdded)
         progress = try c.decodeIfPresent(Double.self, forKey: .progress) ?? lc.decodeIfPresent(Double.self, forKey: .progress) ?? 0
         status = try c.decodeIfPresent(DownloadStatus.self, forKey: .status) ?? lc.decodeIfPresent(DownloadStatus.self, forKey: .status) ?? .pending
@@ -218,6 +224,7 @@ class DownloadItem: ObservableObject, Identifiable, Codable {
         try container.encode(quality, forKey: .quality)
         try container.encodeIfPresent(selectedBandwidth, forKey: .selectedBandwidth)
         try container.encodeIfPresent(qualityName, forKey: .qualityName)
+        try container.encode(isHLSStream, forKey: .isHLSStream)
         try container.encode(dateAdded, forKey: .dateAdded)
         try container.encode(progress, forKey: .progress)
         try container.encode(status, forKey: .status)
@@ -920,7 +927,7 @@ class DownloadManager: ObservableObject {
     }
 
     private func effectiveConcurrentDownloadCount(for download: DownloadItem) -> Int {
-        guard Self.looksLikeHLS(download.videoUrl) else {
+        guard download.isHLSStream else {
             return 1
         }
         return max(1, download.concurrentDownloads)
@@ -993,27 +1000,34 @@ class DownloadManager: ObservableObject {
         fallbackUrls: [String] = [],
         tmdbId: Int? = nil,
         sourceName: String? = nil,
+        isHLSStream: Bool? = nil,
         selectedResolution: String? = nil,
         selectedVideoRange: String? = nil,
         episodeIntro: Double? = nil,
         episodeIntroDuration: Double? = nil,
         episodeEnd: Double? = nil
     ) {
+        let requestedQualityName = selectedBandwidth.map {
+            qualityName ?? Self.qualityNameForBandwidth($0)
+        } ?? qualityName
         let activeStatuses: Set<DownloadStatus> = [.queued, .downloading, .paused, .pending]
         if downloads.contains(where: {
             $0.contentId == contentId &&
                 $0.episodeIndex == episodeIndex &&
                 $0.seasonIndex == seasonIndex &&
                 $0.videoUrl == videoUrl &&
+                $0.qualityName == requestedQualityName &&
+                $0.selectedResolution == selectedResolution &&
+                $0.selectedVideoRange == selectedVideoRange &&
                 activeStatuses.contains($0.status)
         }) {
             StreamifyLogger.log("DownloadManager: Ignoring duplicate queued download for \(contentId) \(videoUrl)")
             return
         }
 
+        let resolvedIsHLSStream = isHLSStream ?? Self.looksLikeHLS(videoUrl)
         let download: DownloadItem
         if let bw = selectedBandwidth {
-            let resolvedQualityName = qualityName ?? Self.qualityNameForBandwidth(bw)
             download = DownloadItem(
                 contentId: contentId,
                 videoUrl: videoUrl,
@@ -1021,7 +1035,8 @@ class DownloadManager: ObservableObject {
                 episodeTitle: episodeTitle,
                 quality: .auto,
                 selectedBandwidth: bw,
-                qualityName: resolvedQualityName,
+                qualityName: requestedQualityName,
+                isHLSStream: resolvedIsHLSStream,
                 episodeIntro: episodeIntro,
                 episodeIntroDuration: episodeIntroDuration,
                 episodeEnd: episodeEnd,
@@ -1034,6 +1049,7 @@ class DownloadManager: ObservableObject {
                 episodeIndex: episodeIndex,
                 episodeTitle: episodeTitle,
                 quality: quality,
+                isHLSStream: resolvedIsHLSStream,
                 episodeIntro: episodeIntro,
                 episodeIntroDuration: episodeIntroDuration,
                 episodeEnd: episodeEnd,
@@ -1045,7 +1061,7 @@ class DownloadManager: ObservableObject {
         download.sourceName = sourceName
         download.selectedResolution = selectedResolution
         download.selectedVideoRange = selectedVideoRange
-        if !Self.looksLikeHLS(videoUrl) {
+        if !download.isHLSStream {
             download.concurrentDownloads = 1
         }
         download.status = .queued
@@ -1134,6 +1150,7 @@ class DownloadManager: ObservableObject {
             resolution: download.selectedResolution
            ),
            let newUrl = quality.sourceUrl ?? quality.variantUrl {
+            download.isHLSStream = quality.isHLSStream
             if download.videoUrl != newUrl {
                 download.videoUrl = newUrl
                 download.resumeData = nil
@@ -1147,6 +1164,10 @@ class DownloadManager: ObservableObject {
             saveDownloads()
             StreamifyLogger.log("DownloadManager: Refreshed VidLove \(quality.name) URL for \(download.displayTitle)")
         } else if let newUrl = result?.streamUrl {
+            download.isHLSStream = HLSQuality.looksLikeHLS(
+                newUrl,
+                qualities: result?.qualities ?? []
+            )
             if download.videoUrl != newUrl {
                 download.videoUrl = newUrl
                 download.resumeData = nil
@@ -1258,7 +1279,7 @@ class DownloadManager: ObservableObject {
                     self.saveDownloads()
                 }
 
-                if Self.looksLikeHLS(download.videoUrl) {
+                if download.isHLSStream {
                     try await downloadHLSStream(download: download, url: url)
                 } else {
                     try await downloadFile(download: download, url: url)
@@ -3062,7 +3083,7 @@ class DownloadManager: ObservableObject {
                 }
 
                 // Resume HLS stream from last saved segment
-                if Self.looksLikeHLS(download.videoUrl) {
+                if download.isHLSStream {
                     try await resumeHLSStream(download: download, url: url)
                 } else {
                     // Direct files use URLSession resume data when the server provides it.

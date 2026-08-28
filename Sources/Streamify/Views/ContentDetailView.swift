@@ -58,6 +58,8 @@ struct ContentDetailView: View {
 
     // Playback resolution — task handle for cancellation, skipper for per-URL skip
     @State var playResolutionTask: Task<Void, Never>? = nil
+    @State var playResolutionTimeoutTask: Task<Void, Never>? = nil
+    @State var playResolutionGeneration: Int = 0
     @State var urlCheckSkipper: URLCheckSkipper? = nil
     // Retains the last non-nil loadingMessage so the exit animation of the overlay
     // shows the correct text instead of the "Setting up video player..." fallback.

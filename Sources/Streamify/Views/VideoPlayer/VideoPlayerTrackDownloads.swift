@@ -44,7 +44,14 @@ extension VideoPlayerView {
         }
         let matching = downloadManager.downloads.filter(contentFilter)
         if let sourceUrl,
-           let sourceMatch = matching.first(where: { mainDownload($0, matchesSourceUrl: sourceUrl, sourceName: sourceName) }) {
+           let sourceMatch = matching.first(where: {
+               mainDownload(
+                   $0,
+                   matchesSourceUrl: sourceUrl,
+                   sourceName: sourceName,
+                   qualityName: qualityName
+               )
+           }) {
             return sourceMatch
         }
         if isTorrentioSource(sourceName: sourceName, urlString: sourceUrl) {
@@ -61,27 +68,46 @@ extension VideoPlayerView {
         return matching.first
     }
 
-    func mainDownload(_ item: DownloadItem, matchesSourceUrl sourceUrl: String, sourceName: String?) -> Bool {
+    func mainDownload(
+        _ item: DownloadItem,
+        matchesSourceUrl sourceUrl: String,
+        sourceName: String?,
+        qualityName: String?
+    ) -> Bool {
+        let sourceMatches: Bool
         if item.videoUrl == sourceUrl {
-            return true
+            sourceMatches = true
+        } else if isTorrentioSource(sourceName: sourceName, urlString: sourceUrl)
+                    || isTorrentioSource(sourceName: item.sourceName, urlString: item.videoUrl) {
+            sourceMatches = torrentioSourceUrlsMatch(sourceUrl, item.videoUrl)
+        } else {
+            sourceMatches = false
         }
-        guard isTorrentioSource(sourceName: sourceName, urlString: sourceUrl) ||
-                isTorrentioSource(sourceName: item.sourceName, urlString: item.videoUrl) else {
-            return false
-        }
-        return torrentioSourceUrlsMatch(sourceUrl, item.videoUrl)
+        guard sourceMatches else { return false }
+        return qualityName == nil || item.qualityName == qualityName
     }
 
-    func downloadedQuality(_ quality: DownloadedVideoQuality, matchesSourceUrl sourceUrl: String, sourceName: String?) -> Bool {
-        guard let downloadedSourceUrl = quality.sourceUrl else { return false }
-        if downloadedSourceUrl == sourceUrl {
-            return true
-        }
-        guard isTorrentioSource(sourceName: sourceName, urlString: sourceUrl) ||
-                isTorrentioSource(sourceName: quality.sourceName, urlString: downloadedSourceUrl) else {
+    func downloadedQuality(_ downloaded: DownloadedVideoQuality, matches quality: HLSQuality) -> Bool {
+        guard let sourceUrl = quality.sourceUrl ?? quality.variantUrl,
+              let downloadedSourceUrl = downloaded.sourceUrl else {
             return false
         }
-        return torrentioSourceUrlsMatch(sourceUrl, downloadedSourceUrl)
+        let sourceMatches: Bool
+        if downloadedSourceUrl == sourceUrl {
+            sourceMatches = true
+        } else if isTorrentioSource(sourceName: quality.sourceName, urlString: sourceUrl)
+                    || isTorrentioSource(sourceName: downloaded.sourceName, urlString: downloadedSourceUrl) {
+            sourceMatches = torrentioSourceUrlsMatch(sourceUrl, downloadedSourceUrl)
+        } else {
+            sourceMatches = false
+        }
+        guard sourceMatches else { return false }
+        let resolutionMatches = downloaded.resolution == nil
+            || quality.resolution == nil
+            || downloaded.resolution == quality.resolution
+        return downloaded.name == quality.name
+            && downloaded.isHDR == quality.isHDR
+            && resolutionMatches
     }
 
     func torrentioSourceUrlsMatch(_ requestedUrl: String, _ existingUrl: String) -> Bool {

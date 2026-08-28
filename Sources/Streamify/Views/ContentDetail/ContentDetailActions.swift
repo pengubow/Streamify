@@ -589,7 +589,12 @@ extension ContentDetailView {
 
     func downloadQuality(_ downloaded: DownloadedVideoQuality, matches quality: MultiSourceQuality) -> Bool {
         if let sourceUrl = quality.sourceUrls.first, downloaded.sourceUrl == sourceUrl {
-            return true
+            let resolutionMatches = downloaded.resolution == nil
+                || quality.resolution == nil
+                || downloaded.resolution == quality.resolution
+            return downloaded.name == quality.name
+                && downloaded.isHDR == quality.isHDR
+                && resolutionMatches
         }
 
         // Legacy metadata did not store sourceUrl. Keep the fallback for normal HLS

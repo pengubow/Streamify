@@ -42,16 +42,7 @@ extension VideoPlayerView {
     var topBar: some View {
         HStack(spacing: 12) {
             Button {
-                guard !hasCalledDismiss else { return }
-                hasCalledDismiss = true
-                saveProgress()
-                // Animate the player view rotating from landscape to portrait.
-                isAnimatingExit = true
-                // After the visual rotation completes, switch to portrait and dismiss.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    OrientationManager.shared.rotate(to: .portrait)
-                    self.onDismiss()
-                }
+                beginPlayerDismissal()
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.title2.weight(.semibold))

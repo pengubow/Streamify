@@ -269,11 +269,14 @@ extension VideoPlayerView {
             let savedProgress = WatchingProgressManager.getProgress(for: content.id, seasonIndex: seasonNumber, episodeIndex: episodeNumber)
             realTime = savedProgress?.timestamp ?? 0
         }
-        let isHLS = url.pathExtension.lowercased() == "m3u8" || url.absoluteString.contains(".m3u8")
         // Preserve existing qualities if none were explicitly provided — this prevents
         // the quality list from being wiped when the user switches between sources
         // (e.g., tapping a provider quality from the picker).
         let qualitiesToPass = preloadedQualities ?? (viewModel.availableQualities.isEmpty ? nil : viewModel.availableQualities)
+        let isHLS = HLSQuality.looksLikeHLS(
+            url.absoluteString,
+            qualities: qualitiesToPass ?? []
+        )
         
         StreamifyLogger.log("switchPlayerToUrl: captured realTime=\(realTime)s, switching to \(url.lastPathComponent) preloadedQualities=\(qualitiesToPass?.count ?? 0)")
         
@@ -651,7 +654,7 @@ extension VideoPlayerView {
         let remoteSourceUrl = quality.sourceUrl ?? quality.variantUrl
         let isDownloaded = allDownloadedQualities.contains { dq in
             guard isDownloadedQualityOnDisk(dq) else { return false }
-            if let remoteSourceUrl, downloadedQuality(dq, matchesSourceUrl: remoteSourceUrl, sourceName: quality.sourceName) {
+            if remoteSourceUrl != nil, downloadedQuality(dq, matches: quality) {
                 return true
             }
             return dq.sourceUrl == nil &&
@@ -882,6 +885,7 @@ extension VideoPlayerView {
             fallbackUrls: [],
             tmdbId: downloadTmdbId,
             sourceName: quality.sourceName,
+            isHLSStream: quality.isHLSStream,
             selectedResolution: quality.resolution,
             selectedVideoRange: quality.videoRange,
             episodeIntro: currentEpisodeInfo?.intro,

@@ -94,6 +94,9 @@ extension ContentDetailView {
     }
 
     func cancelLoadingOverlay() {
+        playResolutionGeneration += 1
+        playResolutionTimeoutTask?.cancel()
+        playResolutionTimeoutTask = nil
         urlCheckSkipper?.skip()
         playResolutionTask?.cancel()
         playResolutionTask = nil

@@ -32,16 +32,26 @@ enum VidLoveService {
         let servers: [Server]
         let subtitleProvider: SubtitleProvider?
         let responseKeys: [String]
-        let authPath: String
+        let authPath: String?
+    }
+
+    private struct SourceResolution: Sendable {
+        let candidates: [StreamCandidate]
+        let subtitles: [SubtitleTrack]
     }
 
     private struct StreamCandidate: Sendable {
         let server: String
         let name: String
+        let bandwidth: Double
         let height: Int?
         let resolution: String?
+        let videoRange: String?
+        let frameRate: String?
         let url: URL
+        let masterUrl: URL?
         let headers: [String: String]
+        let isExplicitQuality: Bool
         var supportsByteRangeSeeking: Bool = false
     }
 
@@ -138,8 +148,13 @@ enum VidLoveService {
         resolution: String?
     ) -> HLSQuality? {
         if let previousURL,
+           let match = result.qualities.first(where: { $0.variantUrl == previousURL }) {
+            return match
+        }
+        if let qualityName, let resolution,
            let match = result.qualities.first(where: {
-               $0.sourceUrl == previousURL || $0.variantUrl == previousURL
+               $0.name.caseInsensitiveCompare(qualityName) == .orderedSame
+                   && $0.resolution == resolution
            }) {
             return match
         }
@@ -151,6 +166,10 @@ enum VidLoveService {
         }
         if let resolution,
            let match = result.qualities.first(where: { $0.resolution == resolution }) {
+            return match
+        }
+        if let previousURL,
+           let match = result.qualities.first(where: { $0.sourceUrl == previousURL }) {
             return match
         }
         return result.qualities.first
@@ -172,6 +191,10 @@ enum VidLoveService {
         if let originKey = originCacheKey(for: url),
            let origin = requestHeaderCache.object(forKey: originKey) {
             return origin.headers
+        }
+        if let host = url.host?.lowercased(),
+           host == "shows.st" || host.hasSuffix(".shows.st") {
+            return standardHeaders()
         }
         return [:]
     }
@@ -198,29 +221,38 @@ enum VidLoveService {
     private static func fetchStream(_ content: ContentRequest) async -> VidLoveResult? {
         do {
             let configuration = try await discoverRuntime(for: content)
-            async let source = firstWorkingSource(for: content, configuration: configuration)
-            async let subtitles = fetchSubtitles(for: content, provider: configuration.subtitleProvider)
-            let (candidates, tracks) = await (source, subtitles)
+            let resolution = await firstWorkingSource(for: content, configuration: configuration)
+            let candidates = resolution.candidates
+            let tracks = resolution.subtitles.isEmpty
+                ? await fetchSubtitles(for: content, provider: configuration.subtitleProvider)
+                : resolution.subtitles
 
             guard !candidates.isEmpty else {
                 StreamifyLogger.log("VidLoveService: No live media URL was returned by any discovered source")
                 return nil
             }
 
-            let qualities = candidates.map { candidate in
+            let qualityCandidates = candidates.contains(where: \.isExplicitQuality)
+                ? candidates.filter(\.isExplicitQuality)
+                : candidates
+            let playbackUrl = qualityCandidates.compactMap(\.masterUrl).first ?? candidates[0].url
+            let qualities = qualityCandidates.map { candidate in
                 register(headers: candidate.headers, for: candidate.url)
+                if let masterUrl = candidate.masterUrl {
+                    register(headers: candidate.headers, for: masterUrl)
+                }
                 byteRangeSeekabilityCache.setObject(
                     NSNumber(value: candidate.supportsByteRangeSeeking),
                     forKey: candidate.url.absoluteString as NSString
                 )
                 return HLSQuality(
                     name: candidate.name,
-                    bandwidth: 0,
+                    bandwidth: candidate.bandwidth,
                     resolution: candidate.resolution,
-                    videoRange: nil,
-                    frameRate: nil,
-                    sourceUrl: candidate.url.absoluteString,
-                    variantUrl: nil,
+                    videoRange: candidate.videoRange,
+                    frameRate: candidate.frameRate,
+                    sourceUrl: candidate.masterUrl?.absoluteString ?? candidate.url.absoluteString,
+                    variantUrl: candidate.masterUrl == nil ? nil : candidate.url.absoluteString,
                     sourceName: "VidLove",
                     displayDetail: candidate.server
                 )
@@ -228,11 +260,11 @@ enum VidLoveService {
 
             StreamifyLogger.log(
                 "VidLoveService: Resolved \(qualities.count) quality option(s), "
-                    + "\(candidates.filter(\.supportsByteRangeSeeking).count) range-seekable, "
+                    + "\(qualityCandidates.filter(\.supportsByteRangeSeeking).count) range-seekable, "
                     + "and \(tracks.count) subtitle(s)"
             )
             return VidLoveResult(
-                streamUrl: candidates[0].url.absoluteString,
+                streamUrl: playbackUrl.absoluteString,
                 subtitles: tracks,
                 qualities: qualities
             )
@@ -275,25 +307,53 @@ enum VidLoveService {
         }
 
         let bundle = try await fetchText(bundleUrl, headers: standardHeaders())
+        var configurationBundle = bundle
+        if let configurationRef = firstCapture(
+            pattern: #"[\"'](assets/serverConfigs-[^\"']+\.js)[\"']"#,
+            in: bundle
+        ),
+           let configurationUrl = URL(string: configurationRef, relativeTo: playerUrl)?.absoluteURL,
+           let discoveredBundle = try? await fetchText(configurationUrl, headers: standardHeaders()) {
+            configurationBundle = discoveredBundle
+        }
+        let discoveryBundle = bundle + "\n" + configurationBundle
         var variables: [String: String] = [:]
         for match in captures(
             pattern: #"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*["'](https?://[^"']+)["']"#,
-            in: bundle
+            in: discoveryBundle
         ) where match.count >= 2 {
             variables[match[0]] = match[1]
         }
 
         var servers: [Server] = []
-        for match in captures(
-            pattern: #"\{name:"([^"]+)",api:([A-Za-z_$][\w$]*)\+"([^"]+)",tvApi:\2\+"([^"]+)""#,
-            in: bundle
-        ) where match.count >= 4 {
-            guard let base = variables[match[1]] else { continue }
-            servers.append(Server(
-                name: match[0],
-                movieTemplate: base + match[2],
-                tvTemplate: base + match[3]
-            ))
+        if let base = firstCapture(
+            pattern: #"["'](https?://[^"']+)["']\.replace\(/\\/\+\$"#,
+            in: configurationBundle
+        ) {
+            for match in captures(
+                pattern: #"\{name:"([^"]+)",key:"([^"]+)""#,
+                in: configurationBundle
+            ) where match.count >= 2 {
+                let key = match[1]
+                servers.append(Server(
+                    name: match[0],
+                    movieTemplate: "\(base)/movie?id=${id}&mode=json&sources=\(key)",
+                    tvTemplate: "\(base)/tv?id=${id}&season=${season}&episode=${episode}&mode=json&sources=\(key)"
+                ))
+            }
+        }
+        if servers.isEmpty {
+            for match in captures(
+                pattern: #"\{name:"([^"]+)",api:([A-Za-z_$][\w$]*)\+"([^"]+)",tvApi:\2\+"([^"]+)""#,
+                in: discoveryBundle
+            ) where match.count >= 4 {
+                guard let base = variables[match[1]] else { continue }
+                servers.append(Server(
+                    name: match[0],
+                    movieTemplate: base + match[2],
+                    tvTemplate: base + match[3]
+                ))
+            }
         }
         guard !servers.isEmpty else {
             throw ServiceError.discovery("VidLove source list was not found in the current player bundle")
@@ -301,8 +361,8 @@ enum VidLoveService {
 
         let subtitleProvider: SubtitleProvider? = {
             guard let match = captures(
-                pattern: #"\{name:"([^"]+)",baseUrl:"([^"]+)",movieEndpoint:"([^"]+)",tvEndpoint:"([^"]+)""#,
-                in: bundle
+                pattern: #"\{name:"([^"]+)",baseUrl:"([^"]+)"(?:\.replace\([^)]*\))?,movieEndpoint:"([^"]+)",tvEndpoint:"([^"]+)""#,
+                in: discoveryBundle
             ).first, match.count >= 4 else {
                 return nil
             }
@@ -321,7 +381,7 @@ enum VidLoveService {
         }
         for match in captures(
             pattern: #"decryptResponseGcm\(\s*[^,]+,\s*((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))"#,
-            in: bundle
+            in: discoveryBundle
         ) {
             addKey(match.first.flatMap(javascriptLiteral))
         }
@@ -340,66 +400,91 @@ enum VidLoveService {
                 addKey(match.first.flatMap(javascriptLiteral))
             }
         }
-        guard !responseKeys.isEmpty else {
-            throw ServiceError.discovery("VidLove response key was not discoverable from current assets")
-        }
-
-        guard let authPath = firstCapture(
+        let authPath = responseKeys.isEmpty ? nil : firstCapture(
             pattern: #"/(auth/[a-z0-9_/-]+)"#,
-            in: bundle,
+            in: discoveryBundle,
             options: [.caseInsensitive]
-        ) else {
-            throw ServiceError.discovery("VidLove token route was not found")
-        }
+        ).map { "/" + $0 }
 
         return RuntimeConfiguration(
             servers: servers,
             subtitleProvider: subtitleProvider,
             responseKeys: responseKeys,
-            authPath: "/" + authPath
+            authPath: authPath
         )
     }
 
     private static func firstWorkingSource(
         for content: ContentRequest,
         configuration: RuntimeConfiguration
-    ) async -> [StreamCandidate] {
+    ) async -> SourceResolution {
         for server in configuration.servers {
             let template = content.type == .series ? server.tvTemplate : server.movieTemplate
             let endpointString = fill(template: template, content: content)
-            guard let endpoint = URL(string: endpointString),
-                  let origin = originURL(for: endpoint) else {
+            guard let endpoint = URL(string: endpointString) else {
                 continue
             }
 
             do {
-                var response: HTTPResult?
-                for attempt in 0..<2 {
-                    let token = try await fetchToken(origin: origin, authPath: configuration.authPath)
-                    var request = URLRequest(url: endpoint)
-                    request.timeoutInterval = 30
-                    apply(headers: standardHeaders(accept: "application/json,*/*"), to: &request)
-                    request.setValue(token, forHTTPHeaderField: "x-request-token")
-                    request.setValue("aes-gcm", forHTTPHeaderField: "x-response-encryption")
-                    response = try await send(request)
-                    if ![401, 403].contains(response?.response.statusCode ?? 0) || attempt == 1 {
-                        break
-                    }
-                }
-
-                guard let response else { continue }
-                let wire = try jsonObject(from: response.data)
-                let payload = try decrypt(wire: wire, keys: configuration.responseKeys)
+                let payload = try await fetchSourcePayload(
+                    endpoint: endpoint,
+                    configuration: configuration
+                )
                 let candidates = streamCandidates(from: payload, endpoint: endpoint, server: server.name)
                 let live = await verified(candidates)
                 if !live.isEmpty {
-                    return live
+                    let subtitles = subtitleTracks(
+                        from: payload["subtitles"] as? [Any] ?? [],
+                        relativeTo: endpoint,
+                        providerName: server.name
+                    )
+                    return SourceResolution(candidates: live, subtitles: subtitles)
                 }
             } catch {
                 StreamifyLogger.log("VidLoveService: \(server.name) failed: \(error.localizedDescription)")
             }
         }
-        return []
+        return SourceResolution(candidates: [], subtitles: [])
+    }
+
+    private static func fetchSourcePayload(
+        endpoint: URL,
+        configuration: RuntimeConfiguration
+    ) async throws -> [String: Any] {
+        var baseRequest = URLRequest(url: endpoint)
+        baseRequest.timeoutInterval = 30
+        apply(headers: standardHeaders(accept: "application/json,*/*"), to: &baseRequest)
+
+        guard let authPath = configuration.authPath,
+              !configuration.responseKeys.isEmpty,
+              let origin = originURL(for: endpoint) else {
+            let response = try await send(baseRequest)
+            guard (200..<300).contains(response.response.statusCode) else {
+                throw ServiceError.http(response.response.statusCode, endpoint.absoluteString)
+            }
+            return try jsonObject(from: response.data)
+        }
+
+        var response: HTTPResult?
+        for attempt in 0..<2 {
+            let token = try await fetchToken(origin: origin, authPath: authPath)
+            var request = baseRequest
+            request.setValue(token, forHTTPHeaderField: "x-request-token")
+            request.setValue("aes-gcm", forHTTPHeaderField: "x-response-encryption")
+            response = try await send(request)
+            if ![401, 403].contains(response?.response.statusCode ?? 0) || attempt == 1 {
+                break
+            }
+        }
+
+        guard let response else {
+            throw ServiceError.invalidResponse("VidLove source request did not return a response")
+        }
+        guard (200..<300).contains(response.response.statusCode) else {
+            throw ServiceError.http(response.response.statusCode, endpoint.absoluteString)
+        }
+        let wire = try jsonObject(from: response.data)
+        return try decrypt(wire: wire, keys: configuration.responseKeys)
     }
 
     private static func fetchToken(origin: URL, authPath: String) async throws -> String {
@@ -472,6 +557,13 @@ enum VidLoveService {
         } else if let streams = payload["streams"] as? [Any] {
             items.append(contentsOf: streams)
         }
+        if let source = payload["source"] {
+            items.insert(source, at: 0)
+            if let dictionary = source as? [String: Any],
+               let qualities = dictionary["qualities"] as? [Any] {
+                items.append(contentsOf: qualities)
+            }
+        }
         for key in ["url", "stream", "m3u8", "playlist"] {
             if let value = payload[key] as? String {
                 items.insert(["url": value, "quality": "Auto"], at: 0)
@@ -479,6 +571,19 @@ enum VidLoveService {
         }
 
         let payloadHeaders = stringDictionary(payload["headers"])
+        func requestHeaders(for url: URL, metadata: [String: Any]?, parentUrl: URL? = nil) -> [String: String] {
+            var headers = standardHeaders()
+            headers.merge(payloadHeaders) { _, new in new }
+            headers.merge(stringDictionary(metadata?["headers"])) { _, new in new }
+            for requestUrl in [parentUrl, url].compactMap({ $0 }) {
+                guard let embedded = embeddedHeaders(in: requestUrl) else { continue }
+                headers.merge(embedded) { _, new in new }
+                headers["Origin"] = playerUrlOrigin
+                headers["Referer"] = playerUrl.absoluteString
+            }
+            return headers
+        }
+
         var seen: Set<String> = []
         var candidates: [StreamCandidate] = []
         for item in items {
@@ -495,34 +600,60 @@ enum VidLoveService {
 
             let rawQuality = stringValue(dictionary?["quality"])
             let rawResolution = stringValue(dictionary?["resolution"])
-            var resolution: String?
-            var resolutionHeight: Int?
-            if let rawResolution,
-               let dimensions = captures(
-                   pattern: #"(\d{2,5})\s*[xX]\s*(\d{2,5})"#,
-                   in: rawResolution
-               ).first,
-               dimensions.count >= 2 {
-                resolution = "\(dimensions[0])x\(dimensions[1])"
-                resolutionHeight = Int(dimensions[1])
-            }
-            let height = rawQuality.flatMap(firstInteger) ?? resolutionHeight
-            var headers = payloadHeaders
-            headers.merge(stringDictionary(dictionary?["headers"])) { _, new in new }
-            if let embedded = embeddedHeaders(in: url) {
-                headers.merge(embedded) { _, new in new }
-                headers["Origin"] = playerUrlOrigin
-                headers["Referer"] = playerUrl.absoluteString
-            }
+            let normalized = normalizedResolution(rawResolution)
+            let height = rawQuality.flatMap(firstInteger) ?? normalized.height
+            let bandwidth = numberValue(dictionary?["bandwidth"])
+                ?? numberValue(dictionary?["bitrate"])
+                ?? 0
+            let normalizedQuality = rawQuality?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let isExplicitQuality = (normalizedQuality != nil && normalizedQuality != "auto")
+                || normalized.value != nil
+                || bandwidth > 0
 
             candidates.append(StreamCandidate(
                 server: server,
                 name: height.map { "\($0)p" } ?? rawQuality ?? "Auto",
+                bandwidth: bandwidth,
                 height: height,
-                resolution: resolution,
+                resolution: normalized.value,
+                videoRange: stringValue(dictionary?["videoRange"])
+                    ?? stringValue(dictionary?["video_range"]),
+                frameRate: stringValue(dictionary?["frameRate"])
+                    ?? stringValue(dictionary?["frame_rate"]),
                 url: url,
-                headers: headers
+                masterUrl: nil,
+                headers: requestHeaders(for: url, metadata: dictionary),
+                isExplicitQuality: isExplicitQuality
             ))
+        }
+
+        if let source = payload["source"] as? [String: Any],
+           let rawMasterUrl = source["url"] as? String,
+           let masterUrl = URL(string: rawMasterUrl, relativeTo: endpoint)?.absoluteURL,
+           let manifest = source["manifest"] as? String {
+            for variant in HLSManifestParser.parseStreamVariants(from: manifest) {
+                guard let variantUrl = URL(string: variant.uri, relativeTo: masterUrl)?.absoluteURL,
+                      seen.insert(variantUrl.absoluteString).inserted else {
+                    continue
+                }
+                let normalized = normalizedResolution(variant.resolution)
+                candidates.append(StreamCandidate(
+                    server: server,
+                    name: HLSManifestParser.qualityName(
+                        resolution: normalized.value,
+                        bandwidth: variant.bandwidth
+                    ),
+                    bandwidth: variant.bandwidth,
+                    height: normalized.height,
+                    resolution: normalized.value,
+                    videoRange: variant.videoRange,
+                    frameRate: variant.frameRate,
+                    url: variantUrl,
+                    masterUrl: masterUrl,
+                    headers: requestHeaders(for: variantUrl, metadata: source, parentUrl: masterUrl),
+                    isExplicitQuality: true
+                ))
+            }
         }
 
         return candidates.sorted {
@@ -635,42 +766,50 @@ enum VidLoveService {
             guard (200..<300).contains(result.response.statusCode) else { return [] }
             let raw = try JSONSerialization.jsonObject(with: result.data)
             let list = (raw as? [Any]) ?? ((raw as? [String: Any])?["subtitles"] as? [Any]) ?? []
-            return list.compactMap { item in
-                guard let item = item as? [String: Any] else { return nil }
-                let rawUrl = item["file"] as? String
-                    ?? item["url"] as? String
-                    ?? item["src"] as? String
-                guard let rawUrl,
-                      let url = URL(string: rawUrl, relativeTo: endpoint)?.absoluteURL else {
-                    return nil
-                }
-                let label = stringValue(item["label"])
-                    ?? stringValue(item["display"])
-                    ?? stringValue(item["language"])
-                    ?? "Unknown"
-                let language = stringValue(item["language"])
-                    ?? stringValue(item["lang"])
-                    ?? label
-                let languageId = language.lowercased().replacingOccurrences(of: " ", with: "_")
-                return SubtitleTrack(
-                    language: language,
-                    source: url.absoluteString,
-                    languageId: languageId,
-                    name: label,
-                    trackId: TrackIdentity.stableTrackId(
-                        type: "subtitle",
-                        source: url.absoluteString,
-                        languageId: languageId,
-                        name: label,
-                        sourceName: "VidLove",
-                        extra: stringValue(item["source"]) ?? provider.name
-                    ),
-                    sourceName: "VidLove"
-                )
-            }
+            return subtitleTracks(from: list, relativeTo: endpoint, providerName: provider.name)
         } catch {
             StreamifyLogger.log("VidLoveService: Subtitle request failed: \(error.localizedDescription)")
             return []
+        }
+    }
+
+    private static func subtitleTracks(
+        from list: [Any],
+        relativeTo endpoint: URL,
+        providerName: String
+    ) -> [SubtitleTrack] {
+        list.compactMap { item in
+            guard let item = item as? [String: Any] else { return nil }
+            let rawUrl = item["file"] as? String
+                ?? item["url"] as? String
+                ?? item["src"] as? String
+            guard let rawUrl,
+                  let url = URL(string: rawUrl, relativeTo: endpoint)?.absoluteURL else {
+                return nil
+            }
+            let label = stringValue(item["label"])
+                ?? stringValue(item["display"])
+                ?? stringValue(item["language"])
+                ?? "Unknown"
+            let language = stringValue(item["language"])
+                ?? stringValue(item["lang"])
+                ?? label
+            let languageId = language.lowercased().replacingOccurrences(of: " ", with: "_")
+            return SubtitleTrack(
+                language: language,
+                source: url.absoluteString,
+                languageId: languageId,
+                name: label,
+                trackId: TrackIdentity.stableTrackId(
+                    type: "subtitle",
+                    source: url.absoluteString,
+                    languageId: languageId,
+                    name: label,
+                    sourceName: "VidLove",
+                    extra: stringValue(item["source"]) ?? providerName
+                ),
+                sourceName: "VidLove"
+            )
         }
     }
 
@@ -810,6 +949,29 @@ enum VidLoveService {
         default:
             return nil
         }
+    }
+
+    private static func numberValue(_ value: Any?) -> Double? {
+        switch value {
+        case let value as NSNumber:
+            return value.doubleValue
+        case let value as String:
+            return Double(value)
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedResolution(_ value: String?) -> (value: String?, height: Int?) {
+        guard let value,
+              let dimensions = captures(
+                  pattern: #"(\d{2,5})\s*[xX]\s*(\d{2,5})"#,
+                  in: value
+              ).first,
+              dimensions.count >= 2 else {
+            return (nil, nil)
+        }
+        return ("\(dimensions[0])x\(dimensions[1])", Int(dimensions[1]))
     }
 
     private static func firstInteger(in value: String) -> Int? {

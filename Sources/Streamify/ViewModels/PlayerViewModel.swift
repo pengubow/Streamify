@@ -75,9 +75,19 @@ struct HLSQuality: Identifiable, Hashable {
         return "\(res)_\(hdr)_\(fps)"
     }
 
+    var isHLSStream: Bool {
+        if variantUrl != nil {
+            return true
+        }
+        guard let sourceUrl else {
+            return false
+        }
+        return Self.looksLikeHLS(sourceUrl)
+    }
+
     var isDirectFileSource: Bool {
-        guard let sourceUrl else { return false }
-        return !Self.looksLikeHLS(sourceUrl)
+        guard sourceUrl != nil else { return false }
+        return !isHLSStream
     }
 
     var displayRank: Int {
@@ -86,6 +96,16 @@ struct HLSQuality: Identifiable, Hashable {
 
     static func looksLikeHLS(_ sourceUrl: String) -> Bool {
         sourceUrl.localizedCaseInsensitiveContains(".m3u8")
+    }
+
+    static func looksLikeHLS(_ sourceUrl: String, qualities: [HLSQuality]) -> Bool {
+        if looksLikeHLS(sourceUrl) {
+            return true
+        }
+        return qualities.contains {
+            $0.variantUrl != nil
+                && ($0.sourceUrl == sourceUrl || $0.variantUrl == sourceUrl)
+        }
     }
 
     static func displayRank(name: String, resolution: String?) -> Int {
@@ -288,11 +308,12 @@ struct MultiSourceQuality: Identifiable {
     let resolution: String?
     let videoRange: String?
     let frameRate: String?
-    let sourceUrls: [String]  // All m3u8 URLs that provide this quality
+    let sourceUrls: [String]  // Master-playlist or direct-file URLs that provide this quality
     let sourceName: String?   // Source attribution (e.g., "VidLove", "Torrentio", source file name)
     let displayDetail: String?
-    
-    init(name: String, bandwidth: Double, resolution: String?, videoRange: String?, frameRate: String?, sourceUrls: [String], sourceName: String? = nil, displayDetail: String? = nil) {
+    let isHLSStream: Bool
+
+    init(name: String, bandwidth: Double, resolution: String?, videoRange: String?, frameRate: String?, sourceUrls: [String], sourceName: String? = nil, displayDetail: String? = nil, isHLSStream: Bool? = nil) {
         self.name = name
         self.bandwidth = bandwidth
         self.resolution = resolution
@@ -301,6 +322,7 @@ struct MultiSourceQuality: Identifiable {
         self.sourceUrls = sourceUrls
         self.sourceName = sourceName
         self.displayDetail = displayDetail
+        self.isHLSStream = isHLSStream ?? sourceUrls.contains(where: HLSQuality.looksLikeHLS)
     }
     
     var isHDR: Bool {
@@ -309,8 +331,8 @@ struct MultiSourceQuality: Identifiable {
     }
 
     var isDirectFileSource: Bool {
-        guard let first = sourceUrls.first else { return false }
-        return !first.localizedCaseInsensitiveContains(".m3u8")
+        guard !sourceUrls.isEmpty else { return false }
+        return !isHLSStream
     }
 
     var displayRank: Int {
@@ -582,9 +604,12 @@ class PlayerViewModel: ObservableObject {
         let isLocalServer = url.host == "localhost" || url.host == "127.0.0.1"
         self.isLocalFile = url.isFileURL || isLocalServer
         
-        // Check if it's an HLS stream — detect m3u8 for both local and remote content.
-        // Local HLS (served via localhost) is still HLS and needs proper codec handling.
-        self.isHLS = url.pathExtension == "m3u8" || url.absoluteString.contains(".m3u8")
+        // Detect normal m3u8 URLs and providers whose signed master URL has no extension.
+        // A preloaded variant URL proves that its matching source URL is an HLS master.
+        self.isHLS = HLSQuality.looksLikeHLS(
+            url.absoluteString,
+            qualities: preloadedQualities ?? []
+        )
         
         StreamifyLogger.log("PlayerViewModel: setup URL=\(url.absoluteString) isLocalFile=\(isLocalFile) isHLS=\(isHLS) preloadedQualities=\(preloadedQualities?.count ?? 0)")
 
@@ -2457,6 +2482,13 @@ class PlayerViewModel: ObservableObject {
     }
 
     // MARK: - Cleanup
+    func cancelPendingRequests() {
+        loadingTask?.cancel()
+        loadingTask = nil
+        sourceRetryTask?.cancel()
+        sourceRetryTask = nil
+    }
+
     func cleanup(
         invalidatePendingSetup: Bool = true,
         completion: (() -> Void)? = nil
@@ -2479,13 +2511,8 @@ class PlayerViewModel: ObservableObject {
         pendingSeekAfterReady = nil
         pendingPlayAfterReady = false
         
-        // Cancel any ongoing loading tasks (HLS parsing, resolution fetching)
-        loadingTask?.cancel()
-        loadingTask = nil
-        
-        // Cancel source retry task
-        sourceRetryTask?.cancel()
-        sourceRetryTask = nil
+        // Cancel any ongoing loading, parsing, and source retry requests.
+        cancelPendingRequests()
         
         // Stop ABR timer
         stopABRTimer()

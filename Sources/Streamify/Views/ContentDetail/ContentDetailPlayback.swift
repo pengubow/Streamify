@@ -5,6 +5,8 @@ extension ContentDetailView {
     func playContent() {
         guard playResolutionTask == nil, loadingMessage == nil else { return }
         let latestContent = currentContent
+        playResolutionGeneration += 1
+        let resolutionGeneration = playResolutionGeneration
         
         // Check local file first
         if !latestContent.folderPath.isEmpty {
@@ -59,9 +61,7 @@ extension ContentDetailView {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                urlCheckSkipper = nil
-                loadingMessage = nil
-                playResolutionTask = nil
+                guard finishPlaybackResolution(generation: resolutionGeneration) else { return }
                 guard let result else {
                     if !skipper.wasSkipped {
                         playError = "Unable to play \(latestContent.metadata.title). All sources failed."
@@ -82,26 +82,18 @@ extension ContentDetailView {
             }
         }
         playResolutionTask = task
-
-        // Overall timeout — covers both source URL checks and service fetches
-        Task {
-            try? await Task.sleep(nanoseconds: Self.playbackResolutionTimeoutNs)
-            guard !task.isCancelled, loadingMessage != nil else { return }
-            task.cancel()
-            await MainActor.run {
-                urlCheckSkipper = nil
-                loadingMessage = nil
-                playResolutionTask = nil
-                playError = "Request timed out. Please try again."
-                showPlayError = true
-            }
-        }
+        schedulePlaybackResolutionTimeout(
+            for: task,
+            generation: resolutionGeneration
+        )
     }
 
     func playEpisode(at index: Int) {
         guard playResolutionTask == nil, loadingMessage == nil else { return }
         let episode = episodes[index]
         let latestContent = currentContent
+        playResolutionGeneration += 1
+        let resolutionGeneration = playResolutionGeneration
 
         // Check local file first
         if let localURL = ContentImportService.videoURL(for: latestContent, episode: episode),
@@ -155,9 +147,7 @@ extension ContentDetailView {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                urlCheckSkipper = nil
-                loadingMessage = nil
-                playResolutionTask = nil
+                guard finishPlaybackResolution(generation: resolutionGeneration) else { return }
                 guard let result else {
                     if !skipper.wasSkipped {
                         playError = "Unable to play S\(episode.season) E\(episode.episode). All sources failed."
@@ -179,18 +169,45 @@ extension ContentDetailView {
             }
         }
         playResolutionTask = task
+        schedulePlaybackResolutionTimeout(
+            for: task,
+            generation: resolutionGeneration
+        )
+    }
 
-        Task {
-            try? await Task.sleep(nanoseconds: Self.playbackResolutionTimeoutNs)
-            guard !task.isCancelled, loadingMessage != nil else { return }
-            task.cancel()
-            await MainActor.run {
-                urlCheckSkipper = nil
-                loadingMessage = nil
-                playResolutionTask = nil
-                playError = "Request timed out. Please try again."
-                showPlayError = true
+    func finishPlaybackResolution(generation: Int) -> Bool {
+        guard generation == playResolutionGeneration else { return false }
+        playResolutionTimeoutTask?.cancel()
+        playResolutionTimeoutTask = nil
+        urlCheckSkipper = nil
+        loadingMessage = nil
+        playResolutionTask = nil
+        return true
+    }
+
+    func schedulePlaybackResolutionTimeout(
+        for resolutionTask: Task<Void, Never>,
+        generation: Int
+    ) {
+        playResolutionTimeoutTask?.cancel()
+        playResolutionTimeoutTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: Self.playbackResolutionTimeoutNs)
+            } catch {
+                return
             }
+            guard generation == playResolutionGeneration,
+                  playResolutionTask != nil,
+                  loadingMessage != nil else { return }
+            urlCheckSkipper?.skip()
+            resolutionTask.cancel()
+            playResolutionGeneration += 1
+            urlCheckSkipper = nil
+            loadingMessage = nil
+            playResolutionTask = nil
+            playResolutionTimeoutTask = nil
+            playError = "Request timed out. Please try again."
+            showPlayError = true
         }
     }
     

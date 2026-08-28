@@ -6,6 +6,80 @@ import MediaPlayer
 import QuartzCore
 
 extension VideoPlayerView {
+    func beginPlayerDismissal() {
+        guard !hasCalledDismiss else { return }
+        hasCalledDismiss = true
+        saveProgress()
+        cancelPlayerScopedRequests()
+        isAnimatingExit = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            OrientationManager.shared.rotate(to: .portrait)
+            self.onDismiss()
+        }
+    }
+
+    func cancelPlayerScopedRequests() {
+        onlineSwitchSkipper?.skip()
+        onlineSwitchSkipper = nil
+        onlineSwitchFetchingURL = nil
+
+        switchToOnlineTask?.cancel()
+        switchToOnlineTask = nil
+        nextEpisodeTask?.cancel()
+        nextEpisodeTask = nil
+        introDBTask?.cancel()
+        introDBTask = nil
+
+        hlsAudioDiscoveryTask?.cancel()
+        hlsAudioDiscoveryTask = nil
+        embeddedAudioInspectionTask?.cancel()
+        embeddedAudioInspectionTask = nil
+
+        remoteAudioLoadGeneration += 1
+        remoteAudioLoadTask?.cancel()
+        remoteAudioLoadTask = nil
+        cancelNativeMatroskaSubtitlePreparation()
+        cancelSubtitleLoad()
+
+        playerReadyCancellable?.cancel()
+        playerReadyCancellable = nil
+        downloadingTrackTask?.cancel()
+        downloadingTrackTask = nil
+        viewModel.cancelPendingRequests()
+    }
+
+    func teardownPlayerAfterDismissal() {
+        guard !hasPerformedPlayerTeardown else { return }
+        hasPerformedPlayerTeardown = true
+
+        acceptsPlayerControlInput = false
+        enablePlayerControlInputTask?.cancel()
+        enablePlayerControlInputTask = nil
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        hideVolumeOverlayTask?.cancel()
+        hideVolumeOverlayTask = nil
+        cancelPendingAudioSync()
+        cancelPlayerScopedRequests()
+
+        resetPlayerPickerPresentationState(context: "player exit")
+        pausedPlaybackForSceneInterruption = false
+        shouldResumeAfterSceneInterruption = false
+        saveProgress()
+        handleEndOfPlayback()
+        stopProgressSaving()
+
+        externalAudioPlayer?.pause()
+        externalAudioPlayer = nil
+        stopCompensatedEmbeddedAudio(unmuteMain: false)
+        audioBufferingObservers.removeAll()
+        teardownRemoteCommandHandlers()
+        resetPiPSeekObservation()
+
+        viewModel.cleanup()
+        MatroskaPlaybackSupport.cleanupTransientStreams()
+    }
+
     // MARK: - Setup Player
     func setupPlayer() {
         brightness = Double(UIScreen.main.brightness)
@@ -128,18 +202,23 @@ extension VideoPlayerView {
         
         // Check embedded audio for spatial audio (EAC-3/Atmos) in HLS streams
         checkEmbeddedAudioForSpatial()
-        
+
+        hlsAudioDiscoveryTask?.cancel()
+        hlsAudioDiscoveryTask = nil
+
         // Parse HLS audio renditions for HLS streams (both remote and local)
         if let preloaded = preloadedAudioTracks, !preloaded.isEmpty {
             // Use pre-parsed audio tracks from ContentDetailView (already parsed before opening player)
             hlsAudioTracks = preloaded
             reapplyAudioAfterTrackDiscovery()
-        } else if !hasLocalFile && (currentVideoURL.pathExtension == "m3u8" || currentVideoURL.absoluteString.contains(".m3u8")) {
+        } else if !hasLocalFile && viewModel.isHLS {
             // Remote HLS: parse audio from master playlist URL
-            Task {
+            hlsAudioDiscoveryTask = Task {
                 let result = await PlayerViewModel.parseHLSAudioRenditions(from: currentVideoURL)
+                guard !Task.isCancelled else { return }
                 let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: currentVideoURL.absoluteString) }
                 await MainActor.run {
+                    guard !Task.isCancelled, !hasCalledDismiss else { return }
                     hlsAudioTracks = parsed
                     embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                     // Re-apply selected audio or preferred language now that HLS tracks are available
@@ -149,7 +228,7 @@ extension VideoPlayerView {
         } else if hasLocalFile {
             // Local content: check for saved master.m3u8 and parse audio renditions from it.
             // Falls back to parsing from the remote source HLS URL if no local master exists.
-            Task {
+            hlsAudioDiscoveryTask = Task {
                 var foundLocal = false
                 let folderPaths = buildFolderPaths()
                 for folder in folderPaths where !folder.isEmpty {
@@ -158,9 +237,11 @@ extension VideoPlayerView {
                         .appendingPathComponent("master.m3u8")
                     if FileManager.default.fileExists(atPath: masterPath.path) {
                         let result = await PlayerViewModel.parseHLSAudioRenditions(from: masterPath)
+                        guard !Task.isCancelled else { return }
                         let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: masterPath.absoluteString) }
                         if !parsed.isEmpty {
                             await MainActor.run {
+                                guard !Task.isCancelled, !hasCalledDismiss else { return }
                                 hlsAudioTracks = parsed
                                 embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                                 reapplyAudioAfterTrackDiscovery()
@@ -198,9 +279,11 @@ extension VideoPlayerView {
                     }
                     if let url = remoteURL {
                         let result = await PlayerViewModel.parseHLSAudioRenditions(from: url)
+                        guard !Task.isCancelled else { return }
                         let parsed = result.renditions.map { $0.toAudioTrack(hlsBaseUrl: url.absoluteString) }
                         if !parsed.isEmpty {
                             await MainActor.run {
+                                guard !Task.isCancelled, !hasCalledDismiss else { return }
                                 hlsAudioTracks = parsed
                                 embeddedAudioIsSpatial = result.embeddedAudioIsSpatial
                                 reapplyAudioAfterTrackDiscovery()
@@ -577,12 +660,16 @@ extension VideoPlayerView {
 
     // MARK: - Spatial Audio Detection
     func checkEmbeddedAudioForSpatial() {
+        embeddedAudioInspectionTask?.cancel()
+        embeddedAudioInspectionTask = nil
         guard let asset = viewModel.asset ?? viewModel.playerItem?.asset else { return }
-        Task {
+        embeddedAudioInspectionTask = Task {
             do {
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+                guard !Task.isCancelled else { return }
                 for audioTrack in audioTracks {
                     let descriptions = try await audioTrack.load(.formatDescriptions)
+                    guard !Task.isCancelled else { return }
                     for desc in descriptions {
                         let mediaSubType = CMFormatDescriptionGetMediaSubType(desc)
                         // EAC-3 (Enhanced AC-3 / Dolby Digital Plus / Dolby Atmos)
@@ -592,6 +679,7 @@ extension VideoPlayerView {
                         if mediaSubType == kAudioFormatEnhancedAC3 || mediaSubType == kAudioFormatAC3 {
                             let codecName = mediaSubType == kAudioFormatEnhancedAC3 ? "EAC-3" : "AC-3"
                             await MainActor.run {
+                                guard !Task.isCancelled, !hasCalledDismiss else { return }
                                 embeddedAudioIsSpatial = true
                                 StreamifyLogger.log("Audio: Detected spatial audio (\(codecName)/Atmos) in embedded stream")
                             }
@@ -600,6 +688,7 @@ extension VideoPlayerView {
                     }
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 StreamifyLogger.log("Audio: Failed to check embedded audio codecs: \(error.localizedDescription)")
             }
         }

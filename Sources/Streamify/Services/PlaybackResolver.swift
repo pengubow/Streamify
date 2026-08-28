@@ -252,7 +252,11 @@ struct PlaybackResolver {
         // Pre-parse HLS audio renditions and qualities before opening the player
         var preloadedAudio: [AudioTrack]? = nil
         var preloadedQualities: [HLSQuality]? = nil
-        let isHLS = resolvedUrl.pathExtension == "m3u8" || resolvedUrl.absoluteString.contains(".m3u8")
+        let vidLoveQualities = vidLove?.qualities ?? []
+        let isHLS = HLSQuality.looksLikeHLS(
+            resolvedUrl.absoluteString,
+            qualities: vidLoveQualities
+        )
         if isHLS && !resolvedUrl.isFileURL {
             // Parse audio from the primary/resolved URL
             let audioData = await PlayerViewModel.parseHLSAudioRenditions(from: resolvedUrl)
@@ -277,7 +281,13 @@ struct PlaybackResolver {
            !allQualityUrls.contains(tUrl.absoluteString) {
             allQualityUrls.append(tUrl.absoluteString)
         }
-        if isHLS && !allQualityUrls.contains(resolvedUrl.absoluteString) {
+        // VidLove's parsed variants already represent its extensionless master URL.
+        // Sending that master back through the generic URL parser would classify it
+        // as a direct "File" merely because its path does not end in .m3u8.
+        let preloadedQualitySourceUrls = Set(vidLoveQualities.compactMap(\.sourceUrl))
+        if isHLS,
+           !preloadedQualitySourceUrls.contains(resolvedUrl.absoluteString),
+           !allQualityUrls.contains(resolvedUrl.absoluteString) {
             allQualityUrls.insert(resolvedUrl.absoluteString, at: 0)
         }
 
