@@ -8,7 +8,7 @@
         <true/>
     </dict>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.0</string>
+    <string>1.2.1</string>
     <key>UISupportsDocumentBrowser</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
