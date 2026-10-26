@@ -15,11 +15,7 @@ enum VidLoveService {
         let episode: Int?
     }
 
-    private struct Server: Sendable {
-        let name: String
-        let movieTemplate: String
-        let tvTemplate: String
-    }
+    private typealias Server = VidLoveRuntimeDiscovery.Server
 
     private struct SubtitleProvider: Sendable {
         let name: String
@@ -308,56 +304,23 @@ enum VidLoveService {
 
         let bundle = try await fetchText(bundleUrl, headers: standardHeaders())
         var configurationBundle = bundle
-        if let configurationRef = firstCapture(
-            pattern: #"[\"'](assets/serverConfigs-[^\"']+\.js)[\"']"#,
-            in: bundle
-        ),
-           let configurationUrl = URL(string: configurationRef, relativeTo: playerUrl)?.absoluteURL,
-           let discoveredBundle = try? await fetchText(configurationUrl, headers: standardHeaders()) {
-            configurationBundle = discoveredBundle
-        }
-        let discoveryBundle = bundle + "\n" + configurationBundle
-        var variables: [String: String] = [:]
-        for match in captures(
-            pattern: #"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*["'](https?://[^"']+)["']"#,
-            in: discoveryBundle
-        ) where match.count >= 2 {
-            variables[match[0]] = match[1]
-        }
-
-        var servers: [Server] = []
-        if let base = firstCapture(
-            pattern: #"["'](https?://[^"']+)["']\.replace\(/\\/\+\$"#,
-            in: configurationBundle
-        ) {
-            for match in captures(
-                pattern: #"\{name:"([^"]+)",key:"([^"]+)""#,
-                in: configurationBundle
-            ) where match.count >= 2 {
-                let key = match[1]
-                servers.append(Server(
-                    name: match[0],
-                    movieTemplate: "\(base)/movie?id=${id}&mode=json&sources=\(key)",
-                    tvTemplate: "\(base)/tv?id=${id}&season=${season}&episode=${episode}&mode=json&sources=\(key)"
-                ))
-            }
-        }
+        var servers = VidLoveRuntimeDiscovery.servers(in: bundle)
         if servers.isEmpty {
-            for match in captures(
-                pattern: #"\{name:"([^"]+)",api:([A-Za-z_$][\w$]*)\+"([^"]+)",tvApi:\2\+"([^"]+)""#,
-                in: discoveryBundle
-            ) where match.count >= 4 {
-                guard let base = variables[match[1]] else { continue }
-                servers.append(Server(
-                    name: match[0],
-                    movieTemplate: base + match[2],
-                    tvTemplate: base + match[3]
-                ))
+            for configurationUrl in VidLoveRuntimeDiscovery.configurationScripts(in: bundle, relativeTo: bundleUrl) {
+                guard let discoveredBundle = try? await fetchText(configurationUrl, headers: standardHeaders()) else {
+                    continue
+                }
+                let discoveredServers = VidLoveRuntimeDiscovery.servers(in: discoveredBundle + "\n" + bundle)
+                guard !discoveredServers.isEmpty else { continue }
+                configurationBundle = discoveredBundle
+                servers = discoveredServers
+                break
             }
         }
         guard !servers.isEmpty else {
             throw ServiceError.discovery("VidLove source list was not found in the current player bundle")
         }
+        let discoveryBundle = bundle + "\n" + configurationBundle
 
         let subtitleProvider: SubtitleProvider? = {
             guard let match = captures(
@@ -421,9 +384,10 @@ enum VidLoveService {
         for server in configuration.servers {
             let template = content.type == .series ? server.tvTemplate : server.movieTemplate
             let endpointString = fill(template: template, content: content)
-            guard let endpoint = URL(string: endpointString) else {
+            guard let rawEndpoint = URL(string: endpointString) else {
                 continue
             }
+            let endpoint = VidLoveRuntimeDiscovery.nativePlaybackURL(rawEndpoint)
 
             do {
                 let payload = try await fetchSourcePayload(

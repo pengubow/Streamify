@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SWIFT_VERSION="6.2.4"
+SWIFT_VERSION="6.4.1"
 MPVKIT_VERSION="93101dc1d0903c48fa3054652805acacbb75e856"
 MPVKIT_URL="https://github.com/edde746/MPVKit.git"
 
