@@ -12,7 +12,9 @@ extension VideoPlayerView {
     }
 
     var isVideoPlaybackRequestedOrActive: Bool {
-        viewModel.isPlaying || viewModel.playbackRate > 0
+        viewModel.isPlaying || viewModel.playbackRate > 0 ||
+            viewModel.mpvEngine?.isPlaybackRequested == true ||
+            viewModel.customEngine?.player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
     }
 
     var isPickerOrSwitchAlertPresented: Bool {

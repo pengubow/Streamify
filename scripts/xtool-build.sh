@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SWIFT_VERSION="6.4.1"
-MPVKIT_VERSION="93101dc1d0903c48fa3054652805acacbb75e856"
+MPVKIT_VERSION="b9e88e80657ec20ced3993c490d9e08b858d9bff"
 MPVKIT_URL="https://github.com/edde746/MPVKit.git"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -142,8 +142,12 @@ prepare_binary_artifacts_from_manifest() {
     local zip_path="$2"
     local framework_path="${artifact_dir}/${target_name}.xcframework"
     local extract_dir="${artifact_dir}/.extract-${target_name}"
+    local checksum_path="${artifact_dir}/.${target_name}.sha256"
+    local zip_checksum
+    zip_checksum="$(sha256sum "$zip_path" | awk '{print $1}')"
 
-    if [[ -f "${framework_path}/Info.plist" ]]; then
+    if [[ -f "${framework_path}/Info.plist" && -f "$checksum_path" ]] &&
+        [[ "$(cat "$checksum_path")" == "$zip_checksum" ]]; then
       return
     fi
 
@@ -163,6 +167,7 @@ prepare_binary_artifacts_from_manifest() {
     rm -rf "$framework_path"
     mv "$extracted_framework" "$framework_path"
     rm -rf "$extract_dir"
+    printf '%s\n' "$zip_checksum" > "$checksum_path"
   }
 
   while IFS=$'\t' read -r target_name target_url expected_checksum; do

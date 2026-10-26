@@ -585,6 +585,7 @@ class PlayerViewModel: ObservableObject {
         initialPosition: Double?,
         requestedHDRHint: Bool
     ) {
+        let setupGeneration = playbackSetupGeneration
         isPlayingHDR = requestedHDRHint
         
         // Save setup params for source retry
@@ -643,9 +644,11 @@ class PlayerViewModel: ObservableObject {
             // For local server HLS, ensure the server is running before starting the player.
             loadingTask = Task {
                 let running = await LocalServer.shared.ensureRunningAsync()
+                guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                 StreamifyLogger.log("PlayerViewModel: Local server ensureRunningAsync result: \(running)")
                 await getLocalHLSResolution(from: url)
                 await MainActor.run {
+                    guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                     self.startPlayer(url: url)
                 }
             }
@@ -658,6 +661,7 @@ class PlayerViewModel: ObservableObject {
                 // Use preloaded qualities if available, otherwise parse from sources
                 if let preloaded = preloadedQualities, !preloaded.isEmpty {
                     await MainActor.run {
+                        guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                         self.availableQualities = preloaded
                     }
                     StreamifyLogger.log("PlayerViewModel: Using \(preloaded.count) pre-parsed qualities, skipping HLS parse")
@@ -666,6 +670,7 @@ class PlayerViewModel: ObservableObject {
                 }
                 
                 await MainActor.run {
+                    guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                     // Lock auto mode to the source being played
                     self.activeAutoSourceUrl = masterURL.absoluteString
                     
@@ -719,6 +724,7 @@ class PlayerViewModel: ObservableObject {
     
     /// Creates the custom player engine and begins playback setup.
     private func startPlayer(url: URL) {
+        customEngine?.cleanup()
         mpvEngine?.cleanup()
         mpvEngine = nil
         mpvAudioTracks = []
@@ -1037,53 +1043,57 @@ class PlayerViewModel: ObservableObject {
     /// Wire up CustomPlayerEngine callbacks to update @Published properties.
     /// This bridges the custom engine's callback pattern to SwiftUI's reactive state.
     private func setupCustomPlayerCallbacks(_ engine: CustomPlayerEngine) {
-        engine.onTimeUpdate = { [weak self] time in
-            guard let self else { return }
+        engine.onTimeUpdate = { [weak self, weak engine] time in
+            guard let self, let engine, self.customEngine === engine else { return }
             guard self.isReadyToPlay, !self.isSeeking else { return }
             self.currentTime = time
             self.updateIntroState()
             self.updateLoadedTimeRanges()
         }
         
-        engine.onDurationChanged = { [weak self] dur in
-            guard let self else { return }
+        engine.onDurationChanged = { [weak self, weak engine] dur in
+            guard let self, let engine, self.customEngine === engine else { return }
             // Only update if duration is positive — prevent overwriting saved duration with 0
             if dur > 0 {
                 self.duration = dur
             }
         }
         
-        engine.onReadyToPlay = { [weak self] in
-            self?.isReadyToPlay = true
-            self?.logHDRPlaybackStatus()
+        engine.onReadyToPlay = { [weak self, weak engine] in
+            guard let self, let engine, self.customEngine === engine else { return }
+            self.isReadyToPlay = true
+            self.logHDRPlaybackStatus()
             // If a recovery seek was scheduled (e.g. after AVErrorMediaServicesWereReset),
             // restore the saved position and resume playback.
-            guard let self, let seekTime = self.pendingSeekAfterReady else { return }
+            guard let seekTime = self.pendingSeekAfterReady else { return }
             let shouldPlay = self.pendingPlayAfterReady
             self.pendingSeekAfterReady = nil
             self.pendingPlayAfterReady = false
-            self.customEngine?.seek(time: seekTime) { [weak self] _ in
+            engine.seek(time: seekTime) { [weak self, weak engine] _ in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, let engine, self.customEngine === engine else { return }
                     if shouldPlay { self.play() }
                 }
             }
         }
         
-        engine.onPlaybackStateChanged = { [weak self] playing in
-            self?.isPlaying = playing
+        engine.onPlaybackStateChanged = { [weak self, weak engine] playing in
+            guard let self, let engine, self.customEngine === engine else { return }
+            self.isPlaying = playing
         }
         
-        engine.onBufferingChanged = { [weak self] buffering in
-            self?.isBuffering = buffering
+        engine.onBufferingChanged = { [weak self, weak engine] buffering in
+            guard let self, let engine, self.customEngine === engine else { return }
+            self.isBuffering = buffering
         }
         
-        engine.onFinished = { [weak self] in
-            self?.isPlaying = false
+        engine.onFinished = { [weak self, weak engine] in
+            guard let self, let engine, self.customEngine === engine else { return }
+            self.isPlaying = false
         }
         
-        engine.onError = { [weak self] error in
-            guard let self else { return }
+        engine.onError = { [weak self, weak engine] error in
+            guard let self, let engine, self.customEngine === engine else { return }
             self.isReadyToPlay = false
             let nsError = error as? NSError
             if let nsError {
@@ -1100,11 +1110,12 @@ class PlayerViewModel: ObservableObject {
                 self.sourceRetryTask?.cancel()
                 let savedTime = self.currentTime
                 let wasPlaying = self.isPlaying
-                self.sourceRetryTask = Task { [weak self] in
+                self.sourceRetryTask = Task { [weak self, weak engine] in
                     try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self, let engine, self.customEngine === engine, !Task.isCancelled else { return }
                     StreamifyLogger.log("PlayerViewModel: Media services reset — reloading player")
                     await MainActor.run {
+                        guard !Task.isCancelled, self.customEngine === engine else { return }
                         // Re-activate the audio session: after a media-services reset iOS
                         // restarts mediaserverd but the session is no longer active.
                         do {
@@ -1130,8 +1141,8 @@ class PlayerViewModel: ObservableObject {
             }
         }
         
-        engine.onAccessLogUpdate = { [weak self] indicatedBitrate, observedBitrate, uri in
-            guard let self else { return }
+        engine.onAccessLogUpdate = { [weak self, weak engine] indicatedBitrate, observedBitrate, uri in
+            guard let self, let engine, self.customEngine === engine else { return }
             StreamifyLogger.log("PlayerItem AccessLog: indicatedBitrate=\(indicatedBitrate) observedBitrate=\(observedBitrate) URI=\(uri ?? "nil")")
             if let uri, TorrentioService.isFailedAccessURL(uri) {
                 StreamifyLogger.log("PlayerViewModel: Torrentio failed-access video detected; suppressing progress for this source")
@@ -1149,8 +1160,9 @@ class PlayerViewModel: ObservableObject {
             }
         }
 
-        engine.onPiPActiveChanged = { [weak self] active in
-            self?.isPiPActive = active
+        engine.onPiPActiveChanged = { [weak self, weak engine] active in
+            guard let self, let engine, self.customEngine === engine else { return }
+            self.isPiPActive = active
         }
     }
 
@@ -1168,11 +1180,13 @@ class PlayerViewModel: ObservableObject {
     
     // MARK: - Get resolution for local files
     private func getLocalFileResolution(asset: AVURLAsset) async {
+        let setupGeneration = playbackSetupGeneration
         do {
             let tracks = try await asset.loadTracks(withMediaType: .video)
             if let videoTrack = tracks.first {
                 let size = try await videoTrack.load(.naturalSize)
                 await MainActor.run {
+                    guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                     self.localFileResolution = "\(Int(size.width))x\(Int(size.height))"
                 }
             }
@@ -1183,6 +1197,7 @@ class PlayerViewModel: ObservableObject {
     
     // MARK: - Get resolution for local HLS (served via local server)
     private func getLocalHLSResolution(from url: URL) async {
+        let setupGeneration = playbackSetupGeneration
         // For downloaded HLS, we downloaded the highest quality
         // Try to get the resolution and VIDEO-RANGE from the m3u8 file
         do {
@@ -1225,6 +1240,7 @@ class PlayerViewModel: ObservableObject {
             )
             
             await MainActor.run {
+                guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                 if let res = highestResolution {
                     // Convert "1920x1080" to "1080p"
                     let parts = res.components(separatedBy: "x")
@@ -1410,6 +1426,7 @@ class PlayerViewModel: ObservableObject {
     
     // MARK: - Parse HLS qualities from m3u8
     func parseHLSQualities(from url: URL) async {
+        let setupGeneration = playbackSetupGeneration
         do {
             let request = VidLoveService.makeRequest(for: url, timeoutInterval: 10)
             let (data, _) = try await URLSession.shared.data(for: request)
@@ -1478,6 +1495,7 @@ class PlayerViewModel: ObservableObject {
             qualities.sort { $0.bandwidth > $1.bandwidth }
             
             await MainActor.run {
+                guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                 self.availableQualities = qualities
                 // Retry auto quality label + HDR update with cached bitrate
                 // (access log may have fired before qualities were parsed)
@@ -1505,6 +1523,7 @@ class PlayerViewModel: ObservableObject {
         } catch {
             // No qualities found on error - leave empty to show "No quality options found"
             await MainActor.run {
+                guard !Task.isCancelled, self.playbackSetupGeneration == setupGeneration else { return }
                 self.availableQualities = []
             }
         }

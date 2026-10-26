@@ -807,8 +807,7 @@ extension VideoPlayerView {
         let targetTime = Self.exactPlayerTime(for: targetSeconds)
         let needsSeekGate = consumeSeekedPlaybackVideoGate()
         let shouldGateAudioStart = shouldResume &&
-            !viewModel.isUsingMPVPlayback &&
-            (needsSeekGate || separateAudioRequiresVideoClockGate(audioPlayer))
+            (viewModel.isUsingMPVPlayback || needsSeekGate || separateAudioRequiresVideoClockGate(audioPlayer))
 
         if !shouldResume {
             viewModel.pause()
@@ -834,7 +833,7 @@ extension VideoPlayerView {
                         }
                         StreamifyLogger.log("Audio: Synced separate audio at \(String(format: "%.2f", targetSeconds))s, resuming")
                         if shouldGateAudioStart {
-                            self.startAudioAfterVideoClockAdvances(audioPlayer, generation: generation, baselineSeconds: targetSeconds)
+                            self.startAudioAfterVideoClockAdvances(audioPlayer, generation: generation, baselineSeconds: self.viewModel.realPlaybackTime)
                         } else {
                             self.viewModel.play {
                                 Task { @MainActor in
@@ -902,8 +901,8 @@ extension VideoPlayerView {
                 let videoAdvanced = videoSeconds.isFinite && videoSeconds > baselineSeconds + 0.03
 
                 if videoIsPlaying && videoAdvanced && !viewModel.isBuffering {
-                    let audioStartSeconds = max(videoSeconds.isFinite ? videoSeconds : baselineSeconds, 0)
-                    audioPlayer.seek(to: Self.exactPlayerTime(for: audioStartSeconds), toleranceBefore: .zero, toleranceAfter: .zero) { [weak audioPlayer] _ in
+                    let audioStartSeconds = max(videoSeconds + separateAudioSyncOffsetSeconds, 0)
+                    audioPlayer.seek(to: Self.exactPlayerTime(for: audioStartSeconds), toleranceBefore: .zero, toleranceAfter: .zero) { [weak audioPlayer = audioPlayer] _ in
                         Task { @MainActor in
                             guard let audioPlayer,
                                   self.isCurrentAudioSync(generation, audioPlayer: audioPlayer) else { return }

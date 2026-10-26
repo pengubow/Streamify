@@ -280,13 +280,12 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private var lastSubtitleText: String = ""
     private var pendingLoad: (url: URL, requestHeaders: [String: String], initialPosition: Double?)?
     private var pendingPlayAfterSurfaceReady = false
-    private var foregroundResumeTargetTime: Double?
-    private var foregroundRecoveryGeneration = 0
     private var backgroundedWhilePlaying = false
     private var isPiPStarting = false
+    private var isPiPStopping = false
+    private var pendingPiPRestoreCompletion: ((Bool) -> Void)?
+    private var pipRestoreGeneration = 0
     private var videoDisabledForBackground = false
-    private var needsForegroundVideoRepaint = false
-    private var foregroundVideoRepaintTargetTime: Double?
     private var appliedPanscan: String?
     private var isShuttingDown = false
 
@@ -318,6 +317,9 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         return true
     }
     var isPiPActive: Bool { pipController?.isPictureInPictureActive ?? false }
+    var isPlaybackRequested: Bool {
+        backgroundedWhilePlaying || pendingPlayAfterSurfaceReady || (!cachedPaused && !cachedEofReached)
+    }
     private var playbackShouldAdvance: Bool {
         !cachedPaused && !cachedPausedForCache && !cachedEofReached
     }
@@ -341,6 +343,8 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         self.videoViewInternal.setExtendedDynamicRangeEnabled(preferHDROutput)
         self.videoViewInternal.onSurfaceReady = { [weak self] in
             self?.startPendingLoadIfSurfaceReady()
+            self?.resumePendingPlaybackIfReady()
+            self?.completePiPRestoreIfReady()
         }
         self.videoViewInternal.onVideoFitModeChanged = { [weak self] _ in
             self?.applyVideoFitMode()
@@ -391,7 +395,8 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     }
 
     private var isVideoSurfaceReady: Bool {
-        guard inlineVideoContainer != nil,
+        guard UIApplication.shared.applicationState != .background,
+              inlineVideoContainer != nil,
               let window = videoViewInternal.window,
               (window.windowScene?.interfaceOrientation.isLandscape == true || window.bounds.width > window.bounds.height) else {
             return false
@@ -432,13 +437,13 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     func play(onStarted: (() -> Void)? = nil) {
         guard mpv != nil else { return }
         guard isPiPActive || isVideoSurfaceReady else {
-            deferPlaybackUntilSurfaceReady(targetTime: currentTime)
+            deferPlaybackUntilSurfaceReady()
             StreamifyLogger.log("MPVDirectPlayerEngine: deferred play until video surface is ready")
             return
         }
-        foregroundRecoveryGeneration += 1
+        restoreVideoOutputIfNeeded()
         pendingPlayAfterSurfaceReady = false
-        foregroundResumeTargetTime = nil
+        backgroundedWhilePlaying = false
         cachedPaused = false
         commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
         commandAsync("set", args: ["pause", "no"])
@@ -450,9 +455,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
 
     func pause() {
         guard mpv != nil else { return }
-        foregroundRecoveryGeneration += 1
         pendingPlayAfterSurfaceReady = false
-        foregroundResumeTargetTime = nil
         backgroundedWhilePlaying = false
         cachedPaused = true
         commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
@@ -522,18 +525,16 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             return
         }
         isShuttingDown = true
+        finishPiPRestore(restored: false)
         NotificationCenter.default.removeObserver(self)
         stateTimer?.invalidate()
         stateTimer = nil
         pendingLoad = nil
         pendingPlayAfterSurfaceReady = false
-        foregroundResumeTargetTime = nil
-        foregroundRecoveryGeneration += 1
         backgroundedWhilePlaying = false
         isPiPStarting = false
         videoDisabledForBackground = false
-        needsForegroundVideoRepaint = false
-        foregroundVideoRepaintTargetTime = nil
+        isPiPStopping = false
         clearPlaybackError()
 
         onReadyToPlay = nil
@@ -586,13 +587,16 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
 
     func refreshVideoOutputLayout() {
         guard !isShuttingDown else { return }
+        if UIApplication.shared.applicationState != .background {
+            restoreVideoOutputIfNeeded()
+        }
         inlineVideoContainer?.setNeedsLayout()
         inlineVideoContainer?.layoutIfNeeded()
         videoViewInternal.refreshDrawableSize()
         applyVideoFitMode()
         startPendingLoadIfSurfaceReady()
         resumePendingPlaybackIfReady()
-        resumeForegroundVideoRepaintIfReady()
+        completePiPRestoreIfReady()
     }
 
     private func applyVideoFitMode() {
@@ -611,13 +615,9 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         }
     }
 
-    private func deferPlaybackUntilSurfaceReady(targetTime: Double?) {
+    private func deferPlaybackUntilSurfaceReady() {
         pendingPlayAfterSurfaceReady = true
-        if let targetTime, targetTime.isFinite {
-            foregroundResumeTargetTime = max(targetTime, 0)
-        }
         cachedPaused = true
-        commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
         commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
         refreshPlaybackState()
         updatePiPPlaybackState()
@@ -628,7 +628,6 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, !self.isShuttingDown, self.mpv != nil else { return }
                 self.refreshVideoOutputLayout()
-                self.resumePendingPlaybackIfReady()
             }
         }
     }
@@ -636,81 +635,14 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private func resumePendingPlaybackIfReady() {
         guard pendingPlayAfterSurfaceReady, mpv != nil else { return }
         guard isPiPActive || isVideoSurfaceReady else { return }
-
         pendingPlayAfterSurfaceReady = false
-        let generation = foregroundRecoveryGeneration + 1
-        foregroundRecoveryGeneration = generation
-        let target = max(foregroundResumeTargetTime ?? currentTime, 0)
-        let repaintTarget = target > 0.2 ? target - 0.12 : target
-        foregroundResumeTargetTime = nil
-
-        commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
-        commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
-        cachedPaused = true
-
-        seek(time: repaintTarget) { [weak self] _ in
-            guard let self else { return }
-            guard generation == self.foregroundRecoveryGeneration else { return }
-            guard self.mpv != nil else { return }
-            guard self.isPiPActive || self.isVideoSurfaceReady else {
-                self.pendingPlayAfterSurfaceReady = true
-                self.foregroundResumeTargetTime = target
-                return
-            }
-
-            self.cachedPaused = false
-            self.commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
-            self.commandAsync("set", args: ["pause", "no"])
-            self.refreshPlaybackState()
-            self.updatePiPPlaybackState()
-            StreamifyLogger.log("MPVDirectPlayerEngine: resumed after video surface recovery at \(String(format: "%.2f", repaintTarget))s")
-        }
-    }
-
-    private func repaintVideoSurface(targetTime: Double, shouldResume: Bool) {
-        guard mpv != nil else { return }
-        guard isPiPActive || isVideoSurfaceReady else {
-            needsForegroundVideoRepaint = true
-            foregroundVideoRepaintTargetTime = targetTime
-            scheduleForegroundRecoveryAttempts()
-            return
-        }
-
-        needsForegroundVideoRepaint = false
-        foregroundVideoRepaintTargetTime = nil
-        let generation = foregroundRecoveryGeneration + 1
-        foregroundRecoveryGeneration = generation
-        let target = max(targetTime, 0)
-        let repaintTarget = target > 0.2 ? target - 0.12 : target
-
-        commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
-        commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
-        cachedPaused = true
-
-        seek(time: repaintTarget) { [weak self] _ in
-            guard let self else { return }
-            guard generation == self.foregroundRecoveryGeneration else { return }
-            guard self.mpv != nil else { return }
-
-            if shouldResume {
-                self.cachedPaused = false
-                self.commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
-                self.commandAsync("set", args: ["pause", "no"])
-            } else {
-                self.cachedPaused = true
-                self.commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
-            }
-            self.refreshPlaybackState()
-            self.updatePiPPlaybackState()
-            StreamifyLogger.log("MPVDirectPlayerEngine: repainted video surface at \(String(format: "%.2f", repaintTarget))s (resume=\(shouldResume))")
-        }
-    }
-
-    private func resumeForegroundVideoRepaintIfReady() {
-        guard needsForegroundVideoRepaint, mpv != nil else { return }
-        guard isPiPActive || isVideoSurfaceReady else { return }
-        let target = foregroundVideoRepaintTargetTime ?? currentTime
-        repaintVideoSurface(targetTime: target, shouldResume: false)
+        restoreVideoOutputIfNeeded()
+        backgroundedWhilePlaying = false
+        cachedPaused = false
+        commandAsync("set", args: ["pause", "no"])
+        refreshPlaybackState()
+        updatePiPPlaybackState()
+        StreamifyLogger.log("MPVDirectPlayerEngine: resumed on the existing video surface without seeking")
     }
 
     private nonisolated static func destroyMpvContext(
@@ -881,6 +813,18 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(enterForeground),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(enterForeground),
+            name: UIScene.didActivateNotification,
+            object: nil
+        )
     }
 
     private func setupPiPControllerIfNeeded() {
@@ -936,6 +880,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     }
 
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard !isShuttingDown, pipController === pictureInPictureController else { return }
         isPiPStarting = true
         updatePiPPlaybackState()
         onPiPActiveChanged?(true)
@@ -943,6 +888,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard !isShuttingDown, pipController === pictureInPictureController else { return }
         isPiPStarting = false
         backgroundedWhilePlaying = false
         onPiPActiveChanged?(true)
@@ -950,20 +896,26 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     }
 
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        onPiPActiveChanged?(false)
+        guard !isShuttingDown, pipController === pictureInPictureController else { return }
+        isPiPStopping = true
         StreamifyLogger.log("MPVDirectPlayerEngine: PiP will stop")
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard !isShuttingDown, pipController === pictureInPictureController else { return }
         isPiPStarting = false
-        onPiPActiveChanged?(false)
-        if UIApplication.shared.applicationState == .active {
-            repaintVideoSurface(targetTime: currentTime, shouldResume: playbackShouldAdvance || isPlaying)
-        } else {
-            needsForegroundVideoRepaint = true
-            foregroundVideoRepaintTargetTime = currentTime
+        isPiPStopping = false
+        if UIApplication.shared.applicationState == .background {
             suspendVideoForBackground(wasPlaying: false, reason: "PiP stopped")
+        } else {
+            // Inactive is part of returning to the app. Disabling vid here can
+            // leave audio running after willEnterForeground already fired.
+            restoreVideoOutputIfNeeded()
+            recoverDisplayLayerIfNeeded()
+            refreshVideoOutputLayout()
+            scheduleForegroundRecoveryAttempts()
         }
+        onPiPActiveChanged?(false)
         StreamifyLogger.log("MPVDirectPlayerEngine: PiP did stop")
     }
 
@@ -971,7 +923,9 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        guard !isShuttingDown, pipController === pictureInPictureController else { return }
         isPiPStarting = false
+        isPiPStopping = false
         onPiPActiveChanged?(false)
         if UIApplication.shared.applicationState == .background {
             suspendVideoForBackground(
@@ -986,7 +940,31 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         _ pictureInPictureController: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-        completionHandler(true)
+        guard !isShuttingDown, pipController === pictureInPictureController else {
+            completionHandler(false)
+            return
+        }
+        finishPiPRestore(restored: false)
+        pipRestoreGeneration += 1
+        let generation = pipRestoreGeneration
+        pendingPiPRestoreCompletion = completionHandler
+        refreshVideoOutputLayout()
+        scheduleForegroundRecoveryAttempts()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, self.pipRestoreGeneration == generation else { return }
+            self.finishPiPRestore(restored: false)
+        }
+    }
+
+    private func completePiPRestoreIfReady() {
+        guard pendingPiPRestoreCompletion != nil, isVideoSurfaceReady else { return }
+        finishPiPRestore(restored: true)
+    }
+
+    private func finishPiPRestore(restored: Bool) {
+        let completion = pendingPiPRestoreCompletion
+        pendingPiPRestoreCompletion = nil
+        completion?(restored)
     }
 
     func pictureInPictureController(
@@ -1039,7 +1017,7 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
 
     @objc private func enterBackground() {
         guard !isShuttingDown, mpv != nil else { return }
-        if isPiPActive || isPiPStarting {
+        if isPiPActive || isPiPStarting || isPiPStopping {
             backgroundedWhilePlaying = false
             updatePiPPlaybackState()
             StreamifyLogger.log("MPVDirectPlayerEngine: entered background with PiP active or starting")
@@ -1065,8 +1043,6 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
     private func pauseForBackground(wasPlaying: Bool, reason: String) {
         backgroundedWhilePlaying = wasPlaying
         pendingPlayAfterSurfaceReady = false
-        foregroundResumeTargetTime = nil
-        foregroundRecoveryGeneration += 1
         cachedPaused = true
         commandAsync("set", args: ["speed", "1.0"], checkForErrors: false)
         commandAsync("set", args: ["pause", "yes"], checkForErrors: false)
@@ -1074,40 +1050,40 @@ final class MPVDirectPlayerEngine: NSObject, ObservableObject, @preconcurrency A
         StreamifyLogger.log("MPVDirectPlayerEngine: paused for \(reason) (wasPlaying=\(backgroundedWhilePlaying))")
     }
 
+    private func restoreVideoOutputIfNeeded() {
+        guard videoDisabledForBackground, mpv != nil else { return }
+        let status = commandAsync("set", args: ["vid", "auto"], checkForErrors: false)
+        if status >= 0 {
+            videoDisabledForBackground = false
+            scheduleTrackRefresh()
+        }
+        StreamifyLogger.log("MPVDirectPlayerEngine: restored video output (queued=\(status >= 0))")
+    }
+
+    private func recoverDisplayLayerIfNeeded() {
+        guard !isPiPActive, !isPiPStarting, !isPiPStopping,
+              let displayLayer = videoViewInternal.sampleBufferDisplayLayer,
+              displayLayer.requiresFlushToResumeDecoding || displayLayer.status == .failed else { return }
+        // Preserve the current image while recovering a display layer that iOS
+        // suspended. A paused decoder only needs a redraw if the layer failed.
+        displayLayer.flush()
+        if cachedPaused && didReportReady {
+            commandAsync("seek", args: ["0", "relative+exact"], checkForErrors: false)
+        }
+        StreamifyLogger.log("MPVDirectPlayerEngine: recovered suspended sample-buffer display layer")
+    }
+
     @objc private func enterForeground() {
         guard !isShuttingDown, mpv != nil else { return }
-        let shouldResumeAfterForeground = backgroundedWhilePlaying || playbackShouldAdvance || isPlaying
-        if isPiPActive || isPiPStarting {
-            backgroundedWhilePlaying = false
-            pendingPlayAfterSurfaceReady = false
-            foregroundResumeTargetTime = nil
-            refreshVideoOutputLayout()
-            updateExtendedDynamicRangeMode(reason: "enter foreground with PiP", force: true)
-            updatePiPPlaybackState()
-            StreamifyLogger.log("MPVDirectPlayerEngine: entered foreground with PiP active")
-            return
-        }
-
-        if videoDisabledForBackground {
-            let status = commandAsync("set", args: ["vid", "auto"], checkForErrors: false)
-            if status >= 0 {
-                videoDisabledForBackground = false
-                scheduleTrackRefresh()
-            }
-            StreamifyLogger.log(
-                "MPVDirectPlayerEngine: restored video output after actual background " +
-                    "(queued=\(status >= 0))"
-            )
-        }
+        // Always restore vid, even when PiP stops between willEnterForeground
+        // and didBecomeActive. Playback intent belongs to the existing session.
+        restoreVideoOutputIfNeeded()
+        recoverDisplayLayerIfNeeded()
         refreshVideoOutputLayout()
         updateExtendedDynamicRangeMode(reason: "enter foreground", force: true)
-        backgroundedWhilePlaying = false
-        needsForegroundVideoRepaint = false
-        foregroundVideoRepaintTargetTime = nil
-        StreamifyLogger.log(
-            "MPVDirectPlayerEngine: entered foreground after background suspension "
-                + "(resume=\(shouldResumeAfterForeground))"
-        )
+        updatePiPPlaybackState()
+        scheduleForegroundRecoveryAttempts()
+        StreamifyLogger.log("MPVDirectPlayerEngine: foreground surface restored without reloading or seeking")
     }
 
     private func startStateTimer() {
@@ -2009,6 +1985,7 @@ final class MPVDirectPlayerEngine: ObservableObject {
     var currentSpeed: Float { 1 }
     var isPiPSupported: Bool { false }
     var isPiPActive: Bool { false }
+    var isPlaybackRequested: Bool { false }
     var isMuted: Bool {
         get { false }
         set { _ = newValue }

@@ -326,18 +326,34 @@ final class CustomPlayerEngine: ObservableObject {
         }
         pipDelegate.onWillStop = { [weak self] in
             Task { @MainActor in
-                self?.onPiPActiveChanged?(false)
+                guard self != nil else { return }
                 StreamifyLogger.log("CustomPlayerEngine: PiP will stop")
             }
         }
         pipDelegate.onDidStop = { [weak self] in
             Task { @MainActor in
+                if UIApplication.shared.applicationState == .background {
+                    self?.pause()
+                    self?.onPlaybackStateChanged?(false)
+                }
+                self?.refreshVideoOutputLayout()
                 self?.onPiPActiveChanged?(false)
                 StreamifyLogger.log("CustomPlayerEngine: PiP did stop")
             }
         }
+        pipDelegate.onFailedToStart = { [weak self] error in
+            Task { @MainActor in
+                if UIApplication.shared.applicationState == .background {
+                    self?.pause()
+                    self?.onPlaybackStateChanged?(false)
+                }
+                self?.onPiPActiveChanged?(false)
+                StreamifyLogger.log("CustomPlayerEngine: PiP failed to start - \(error.localizedDescription)")
+            }
+        }
         pipDelegate.onRestoreUI = { [weak self] completionHandler in
             Task { @MainActor in
+                self?.refreshVideoOutputLayout()
                 if let restoreUI = self?.onPiPRestoreUI {
                     restoreUI(completionHandler)
                 } else {
@@ -364,6 +380,15 @@ final class CustomPlayerEngine: ObservableObject {
     }
 
     // MARK: - Load Media
+
+    func refreshVideoOutputLayout() {
+        guard let player, let playerLayerView else { return }
+        if playerLayerView.playerLayer.player !== player {
+            playerLayerView.playerLayer.player = player
+        }
+        playerLayerView.setNeedsLayout()
+        playerLayerView.layoutIfNeeded()
+    }
 
     /// Load a media URL. Supports local files, remote files, and HLS (m3u8).
     func load(url: URL, isHLS: Bool = false, isLocalFile: Bool = false) {

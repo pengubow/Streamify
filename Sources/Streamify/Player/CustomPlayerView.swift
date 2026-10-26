@@ -27,6 +27,7 @@ struct CustomPlayerView: UIViewRepresentable {
                 attachVideoView(to: uiView)
             }
         }
+        engine.refreshVideoOutputLayout()
     }
 
     private func attachVideoView(to container: UIView) {

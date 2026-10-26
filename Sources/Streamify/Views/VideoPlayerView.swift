@@ -40,6 +40,7 @@ struct VideoPlayerView: View {
     @State var previewTime: Double = 0  // Time preview while seeking
     @State var hasCalledDismiss: Bool = false  // Prevent double-calling onDismiss
     @State var hasPerformedPlayerTeardown: Bool = false
+    @State var hasStartedPlayer: Bool = false
     @State var playerReadyCancellable: AnyCancellable?  // For observing player ready state
 
     @State var hasProcessedReadyState: Bool = false  // Track if we've handled the ready state for this episode
@@ -937,9 +938,10 @@ struct VideoPlayerView: View {
             }
             .onChange(of: viewModel.isPiPActive) { active in
                 resetPiPSeekObservation()
-                guard active, hasSeparateAudioPlayer else { return }
+                guard hasSeparateAudioPlayer else { return }
+                markSeekedPlaybackNeedsVideoGate()
                 syncSeparateAudio(shouldResume: viewModel.isPlaying || viewModel.playbackRate > 0)
-                StreamifyLogger.log("Audio: PiP active — separate audio sync armed")
+                StreamifyLogger.log("Audio: PiP changed (active=\(active)) — separate audio sync armed")
             }
             .onChange(of: viewModel.currentTime) { _ in
                 observePiPVideoSeekAndSyncSeparateAudioIfNeeded()
@@ -1062,6 +1064,7 @@ struct VideoPlayerView: View {
         .ignoresSafeArea()
         .background(Color.black.ignoresSafeArea())
         .onAppear {
+            guard !hasPerformedPlayerTeardown else { return }
             resetPlayerPickerPresentationState(context: "player entry")
             showControls = false
             acceptsPlayerControlInput = false
@@ -1079,9 +1082,15 @@ struct VideoPlayerView: View {
             if videoURL.isFileURL || videoURL.host == "localhost" {
                 activePlayingQualityName = resolveActiveLocalQualityName()
             }
-            setupRemoteCommandHandlers()
-            setupPlayer()
-            prepareVolumeMonitoring()
+            if !hasStartedPlayer {
+                hasStartedPlayer = true
+                setupRemoteCommandHandlers()
+                setupPlayer()
+                prepareVolumeMonitoring()
+            } else {
+                viewModel.mpvEngine?.refreshVideoOutputLayout()
+                viewModel.customEngine?.refreshVideoOutputLayout()
+            }
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
@@ -1089,15 +1098,25 @@ struct VideoPlayerView: View {
                 break
             case .background:
                 pauseForSceneInterruptionIfNeeded()
-                viewModel.customEngine?.trimDecoderBuffers()
-                trimSeparateAudioBuffers()
+                if !viewModel.isPiPActive {
+                    viewModel.customEngine?.trimDecoderBuffers()
+                    trimSeparateAudioBuffers()
+                }
             case .active:
+                viewModel.mpvEngine?.refreshVideoOutputLayout()
+                viewModel.customEngine?.refreshVideoOutputLayout()
                 recoverPlaybackAfterSceneInterruptionIfNeeded()
             @unknown default:
                 break
             }
         }
         .onDisappear {
+            // PiP temporarily hides the inline presentation; it still owns this
+            // playback session. Only an actual dismissal should tear it down.
+            if !hasCalledDismiss && viewModel.isPiPActive {
+                saveProgress()
+                return
+            }
             teardownPlayerAfterDismissal()
             // Force portrait when leaving video player
             OrientationManager.shared.rotate(to: .portrait)
