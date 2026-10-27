@@ -676,19 +676,7 @@ extension ContentDetailView {
     }
 
     func hasRemotePlaybackVideoUrl() -> Bool {
-        if content.metadata.hlsUrl != nil || content.metadata.file != nil {
-            return true
-        }
-        if content.metadata.remoteHlsUrl != nil || content.metadata.remoteFileUrl != nil {
-            return true
-        }
-        if ContentImportService.remoteHlsURL(for: content) != nil {
-            return true
-        }
-        if sourceContent?.hlsUrl != nil || sourceContent?.fileUrl != nil {
-            return true
-        }
-        return resolveTmdbId() != nil && vidLoveEnabled
+        hasRemoteVideoUrl()
     }
 
     func hasSeriesPlayableUrl() -> Bool {
@@ -707,8 +695,8 @@ extension ContentDetailView {
         if episodes.contains(where: { isEpisodeDownloaded($0) }) {
             return true
         }
-        // Streaming providers: playable if we have a TMDB ID and an automatic playback provider is enabled
-        if resolveTmdbId() != nil && vidLoveEnabled {
+        // Streaming providers: playable if we have a TMDB ID and any provider is enabled
+        if resolveTmdbId() != nil && (vidLoveEnabled || torrentioEnabled) {
             return true
         }
         return false
@@ -722,7 +710,7 @@ extension ContentDetailView {
             content.metadata.file != nil ||
             sourceContent?.hlsUrl != nil ||
             sourceContent?.fileUrl != nil ||
-            (resolveTmdbId() != nil && vidLoveEnabled)
+            (resolveTmdbId() != nil && (vidLoveEnabled || torrentioEnabled))
     }
 
     /// Resolve TMDB ID from metadata or source content
