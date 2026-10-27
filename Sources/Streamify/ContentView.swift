@@ -24,24 +24,23 @@ struct ContentView: View {
             )
 
             ZStack(alignment: .top) {
-                tabPage(.library, width: proxy.size.width) {
+                StreamifyTabPage(tab: .library, selectedTab: $selectedTab, width: proxy.size.width) {
                     LibraryView(viewModel: libraryViewModel)
                 }
 
-                tabPage(.downloads, width: proxy.size.width) {
+                StreamifyTabPage(tab: .downloads, selectedTab: $selectedTab, width: proxy.size.width) {
                     DownloadsView()
                 }
 
-                tabPage(.settings, width: proxy.size.width) {
+                StreamifyTabPage(tab: .settings, selectedTab: $selectedTab, width: proxy.size.width) {
                     SettingsView(viewModel: libraryViewModel)
                 }
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     CustomTabBar(
-                        selectedTab: selectedTab,
-                        bottomInset: bottomInset,
-                        onSelect: selectTab
+                        selectedTab: $selectedTab,
+                        bottomInset: bottomInset
                     )
                 }
                 .ignoresSafeArea(edges: .bottom)
@@ -90,31 +89,6 @@ struct ContentView: View {
         )
     }
 
-    @ViewBuilder
-    private func tabPage<Content: View>(_ tab: Tab, width: CGFloat, @ViewBuilder content: () -> Content) -> some View {
-        content()
-            .frame(width: width)
-            .frame(maxHeight: .infinity, alignment: .top)
-            .offset(x: tabOffset(for: tab, width: width))
-            .opacity(tab == selectedTab ? 1 : 0)
-            .zIndex(tab == selectedTab ? 2 : 1)
-            .allowsHitTesting(tab == selectedTab)
-            .accessibilityHidden(tab != selectedTab)
-    }
-
-    private func selectTab(_ tab: Tab) {
-        guard tab != selectedTab else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.03)) {
-            selectedTab = tab
-        }
-    }
-
-    private func tabOffset(for tab: Tab, width: CGFloat) -> CGFloat {
-        guard tab != selectedTab else { return 0 }
-        return tab.rawValue < selectedTab.rawValue ? -width : width
-    }
-
     private var deviceBottomSafeAreaInset: CGFloat {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -124,11 +98,35 @@ struct ContentView: View {
     }
 }
 
+// Each page observes selection directly so the GeometryReader's deferred content
+// does not have to be rebuilt for a tab change to reach its visibility modifiers.
+private struct StreamifyTabPage<Content: View>: View {
+    let tab: ContentView.Tab
+    @Binding var selectedTab: ContentView.Tab
+    let width: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .frame(width: width)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .offset(x: offset)
+            .opacity(tab == selectedTab ? 1 : 0)
+            .zIndex(tab == selectedTab ? 2 : 1)
+            .allowsHitTesting(tab == selectedTab)
+            .accessibilityHidden(tab != selectedTab)
+    }
+
+    private var offset: CGFloat {
+        guard tab != selectedTab else { return 0 }
+        return tab.rawValue < selectedTab.rawValue ? -width : width
+    }
+}
+
 // MARK: - Custom Tab Bar to prevent animation issues
 struct CustomTabBar: View {
-    let selectedTab: ContentView.Tab
+    @Binding var selectedTab: ContentView.Tab
     let bottomInset: CGFloat
-    let onSelect: (ContentView.Tab) -> Void
     
     var body: some View {
         HStack(spacing: 0) {
@@ -137,7 +135,7 @@ struct CustomTabBar: View {
                 label: "Home",
                 isSelected: selectedTab == .library
             ) {
-                onSelect(.library)
+                selectTab(.library)
             }
             
             TabBarButton(
@@ -145,7 +143,7 @@ struct CustomTabBar: View {
                 label: "Downloads",
                 isSelected: selectedTab == .downloads
             ) {
-                onSelect(.downloads)
+                selectTab(.downloads)
             }
             
             TabBarButton(
@@ -153,7 +151,7 @@ struct CustomTabBar: View {
                 label: "Settings",
                 isSelected: selectedTab == .settings
             ) {
-                onSelect(.settings)
+                selectTab(.settings)
             }
         }
         .padding(.top, 7)
@@ -163,6 +161,14 @@ struct CustomTabBar: View {
         }
         .overlay(alignment: .top) {
             StreamifyBarHairline()
+        }
+    }
+
+    private func selectTab(_ tab: ContentView.Tab) {
+        guard tab != selectedTab else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.9, blendDuration: 0.03)) {
+            selectedTab = tab
         }
     }
 }
